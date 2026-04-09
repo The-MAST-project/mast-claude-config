@@ -1,61 +1,37 @@
 ---
 name: sync-vault
-description: Sync common/vault/ secrets from the authoritative MAST_control checkout to all other local and remote MAST_common checkouts
+description: Verify the MAST vault is accessible on all unit machines (vault is a Samba share, no file copying needed)
 user-invocable: true
 ---
 
-Sync the contents of `MAST_control/common/vault/` to every other checkout of `MAST_common`.
+The MAST vault is a shared network location — no file copying is needed. All machines mount it directly.
 
-The `vault/` directory is listed in `.gitignore` and is never committed to git. This skill is the only mechanism for distributing its contents.
+## Vault location
 
-## Source (authoritative)
+| Machine | Path |
+|---------|------|
+| mast-wis-control (local, authoritative) | `/Storage/mast-share/MAST/.mast-vault` |
+| unit machines (Windows, via Samba) | `Z:\MAST.mast-share\.mast-vault` |
 
-```
-/home/mast/PycharmProjects/MAST_control/common/vault/
-```
+The Samba share is exported from mast-wis-control and mounted on all unit machines as `Z:\MAST.mast-share`.
 
-## Targets
-
-| Location | Path |
-|----------|------|
-| local unit | `/home/mast/PycharmProjects/MAST_unit.2024-12-12/src/common/vault/` |
-| mastw (unit, Windows) | `C:\Users\mast\PycharmProjects\MAST_unit.2024-12-12\src\common\vault\` via SSH |
-
-When new machines (spec, additional units) become SSH-reachable, add a row to the table above.
-
-## Step 1 — verify source exists and is non-empty
+## Step 1 — verify vault exists and is non-empty on local machine
 
 ```bash
-ls /home/mast/PycharmProjects/MAST_control/common/vault/
+ls /Storage/mast-share/MAST/.mast-vault
 ```
 
-If the directory does not exist or is empty, stop and tell the user — there is nothing to sync.
+If missing or empty, stop and tell the user.
 
-## Step 2 — sync to all targets (run in parallel)
-
-### Local unit
+## Step 2 — verify vault is accessible on each unit machine (run in parallel)
 
 ```bash
-mkdir -p /home/mast/PycharmProjects/MAST_unit.2024-12-12/src/common/vault
-rsync -av --delete \
-  /home/mast/PycharmProjects/MAST_control/common/vault/ \
-  /home/mast/PycharmProjects/MAST_unit.2024-12-12/src/common/vault/
+# mastw
+ssh mastw "dir Z:\\MAST.mast-share\\.mast-vault"
 ```
 
-### mastw (Windows via SSH)
-
-```bash
-ssh mastw "mkdir -p 'C:/Users/mast/PycharmProjects/MAST_unit.2024-12-12/src/common/vault'"
-rsync -av --delete \
-  /home/mast/PycharmProjects/MAST_control/common/vault/ \
-  mastw:'C:/Users/mast/PycharmProjects/MAST_unit.2024-12-12/src/common/vault/'
-```
-
-If `mastw` is unreachable, report it as skipped and continue.
+If a host is unreachable, report it as skipped.
 
 ## Step 3 — report
 
-For each target report:
-- files transferred (from rsync output)
-- whether it was already up to date
-- if skipped (unreachable), say so
+For each machine report: accessible / not accessible / skipped (unreachable), and list the files visible in the vault.
