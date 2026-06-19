@@ -14,6 +14,7 @@
 - [Sidebar submenu implementation](project_sidebar_submenus.md) — Bootstrap Collapse, not custom JS; why it was changed
 - [WIP skills](project_wip_skills.md) — /wip-commit and /wip-status skills in ~/.claude/skills/
 - [Spec 3D rendering design](project_spec_3d_rendering.md) — ModelUpdater, SSE integration, realtime/simulated modes, data field in activities
+- [Unit self-calibration design](unit-self-calibration-design.md) — design-only: autofocus (HFD/coma), optical-center null, thermal focus seed, calibration invocation/status, pick-off stage geometry, config-DB storage
 
 ### MAST_unit — mount guiding / solve_and_correct (2026-06-19)
 - [mount.is_moving is a slew detector](mount-is-moving-is-a-slew-detector.md) — axis rms_error>3"/1"; was misused as a settle gate (all such sites now migrated); definition now fits its slew-completion/telemetry uses
