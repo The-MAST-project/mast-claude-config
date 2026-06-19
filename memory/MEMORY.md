@@ -15,6 +15,11 @@
 - [WIP skills](project_wip_skills.md) — /wip-commit and /wip-status skills in ~/.claude/skills/
 - [Spec 3D rendering design](project_spec_3d_rendering.md) — ModelUpdater, SSE integration, realtime/simulated modes, data field in activities
 
+### MAST_unit — mount guiding / solve_and_correct (2026-06-19)
+- [mount.is_moving is a slew detector](mount-is-moving-is-a-slew-detector.md) — axis rms_error>3"/1"; was misused as a settle gate (all such sites now migrated); definition now fits its slew-completion/telemetry uses
+- [solve_and_correct channel mismatch](solve-and-correct-gradual-offset-channel-mismatch.md) — root cause of slow/erratic convergence: polled axis0/axis1 progress after commanding ra/dec; FIXED, now on wait_until_settled
+- [wait_until_settled settle-gate fix](wait-until-settled-settle-gate-fix.md) — Mount helper matching wait signal to move type; wired into all settle-gate sites; ApproachMode enum added; not hardware-verified
+
 ## Feedback
 - [Opinion shorthand — ???](feedback_opinion_shorthand.md) — when user types ???, they want my opinion/thoughts/suggestions
 - [SSH key auth on Windows](feedback_ssh_windows.md) — use C:\ProgramData\ssh\administrators_authorized_keys, not ~/.ssh/authorized_keys
