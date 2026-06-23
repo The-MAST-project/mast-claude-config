@@ -15,7 +15,7 @@
 - [WIP skills](project_wip_skills.md) — /wip-commit and /wip-status skills in ~/.claude/skills/
 - [Spec 3D rendering design](project_spec_3d_rendering.md) — ModelUpdater, SSE integration, realtime/simulated modes, data field in activities
 - [Unit self-calibration design](unit-self-calibration-design.md) — design-only: autofocus (HFD/coma), optical-center null, thermal focus seed, calibration invocation/status, pick-off stage geometry, config-DB storage
-- [Folding-mirror shadow detection (implemented)](mirror-shadow-detection-impl.md) — src/imaging/mirror_shadow.py: tilted-band detect/mark/centerline/darken; projection sweep, band-excluded sky fill; thresholds validated both sides (15 mirror-in + 1 retracted)
+- [Folding-mirror shadow detection (implemented)](mirror-shadow-detection-impl.md) — src/imaging/mirror_shadow.py: tilted-band detect/mark/centerline/darken; validated on DEEP shadows; misses faint ~4% ones (full-frame); reference/flat mode is the fix; left as-is for now
 - [Shadow & optical-center algorithms (logic/rationale)](mirror-shadow-optical-center-algorithms.md) — how/why: deficit ratio map, ±90° projection orientation sweep, false-positive gates, collar-matched sky fill, coma-null line-intersection fit, and the "mandate retraction, detect-as-guard" coupling decision
 
 ### MAST_unit — mount guiding / solve_and_correct (2026-06-19)
