@@ -15,7 +15,7 @@
 - [WIP skills](project_wip_skills.md) — /wip-commit and /wip-status skills in ~/.claude/skills/
 - [Spec 3D rendering design](project_spec_3d_rendering.md) — ModelUpdater, SSE integration, realtime/simulated modes, data field in activities
 - [Unit self-calibration design](unit-self-calibration-design.md) — design-only: autofocus (HFD/coma), optical-center null, thermal focus seed, calibration invocation/status, pick-off stage geometry, config-DB storage
-- [Folding-mirror shadow detection (implemented)](mirror-shadow-detection-impl.md) — src/imaging/mirror_shadow.py: tilted-band detect/mark/centerline/darken; validated on DEEP shadows; misses faint ~4% ones (full-frame); reference/flat mode is the fix; left as-is for now
+- [Folding-mirror shadow detection (implemented)](mirror-shadow-detection-impl.md) — src/imaging/mirror_shadow.py: detect/mark/centerline/darken; good for DEEP shadows but poly absorbs WIDE bands → false-negatives on moderate (~8%) shadows (confirmed bug, fix prototyped); optical-center now recovers coma via flux-weighting
 - [Shadow & optical-center algorithms (logic/rationale)](mirror-shadow-optical-center-algorithms.md) — how/why: deficit ratio map, ±90° projection orientation sweep, false-positive gates, collar-matched sky fill, coma-null line-intersection fit, and the "mandate retraction, detect-as-guard" coupling decision
 - [Optical-center-from-coma literature](optical-center-coma-research.md) — deep-research validation of the coma-null method; key upgrade = coma is spin-1 (vector), add centroid-vs-peak + free-node fit + rho-stats; papers (JSJ 2008, Ma 2008, Schechter-Levinson 2009)
 
