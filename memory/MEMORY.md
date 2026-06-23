@@ -17,6 +17,7 @@
 - [Unit self-calibration design](unit-self-calibration-design.md) — design-only: autofocus (HFD/coma), optical-center null, thermal focus seed, calibration invocation/status, pick-off stage geometry, config-DB storage
 - [Folding-mirror shadow detection (implemented)](mirror-shadow-detection-impl.md) — src/imaging/mirror_shadow.py: tilted-band detect/mark/centerline/darken; validated on DEEP shadows; misses faint ~4% ones (full-frame); reference/flat mode is the fix; left as-is for now
 - [Shadow & optical-center algorithms (logic/rationale)](mirror-shadow-optical-center-algorithms.md) — how/why: deficit ratio map, ±90° projection orientation sweep, false-positive gates, collar-matched sky fill, coma-null line-intersection fit, and the "mandate retraction, detect-as-guard" coupling decision
+- [Optical-center-from-coma literature](optical-center-coma-research.md) — deep-research validation of the coma-null method; key upgrade = coma is spin-1 (vector), add centroid-vs-peak + free-node fit + rho-stats; papers (JSJ 2008, Ma 2008, Schechter-Levinson 2009)
 
 ### MAST_unit — mount guiding / solve_and_correct (2026-06-19)
 - [mount.is_moving is a slew detector](mount-is-moving-is-a-slew-detector.md) — axis rms_error>3"/1"; was misused as a settle gate (all such sites now migrated); definition now fits its slew-completion/telemetry uses
