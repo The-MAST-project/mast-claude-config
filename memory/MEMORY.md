@@ -16,6 +16,7 @@
 - [Spec 3D rendering design](project_spec_3d_rendering.md) — ModelUpdater, SSE integration, realtime/simulated modes, data field in activities
 - [Unit self-calibration design](unit-self-calibration-design.md) — design-only: autofocus (HFD/coma), optical-center null, thermal focus seed, calibration invocation/status, pick-off stage geometry, config-DB storage
 - [Folding-mirror shadow detection (implemented)](mirror-shadow-detection-impl.md) — src/imaging/mirror_shadow.py: tilted-band detect/mark/centerline/darken; projection sweep, band-excluded sky fill; thresholds need a clean frame to validate
+- [Shadow & optical-center algorithms (logic/rationale)](mirror-shadow-optical-center-algorithms.md) — how/why: deficit ratio map, ±90° projection orientation sweep, false-positive gates, collar-matched sky fill, coma-null line-intersection fit, and the "mandate retraction, detect-as-guard" coupling decision
 
 ### MAST_unit — mount guiding / solve_and_correct (2026-06-19)
 - [mount.is_moving is a slew detector](mount-is-moving-is-a-slew-detector.md) — axis rms_error>3"/1"; was misused as a settle gate (all such sites now migrated); definition now fits its slew-completion/telemetry uses

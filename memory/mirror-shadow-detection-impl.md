@@ -7,6 +7,8 @@ type: project
 Implemented 2026-06-23 (Arie + Claude) in `src/imaging/mirror_shadow.py` (MAST_unit repo) — the
 pick-off folding-mirror shadow handling from [[unit-self-calibration-design]] §10, now actual code (that doc is design-only).
 
+Algorithmic logic & rationale (deficit map, projection sweep, band-excluded fill, coma-null fit, shadow↔optical-center coupling): [[mirror-shadow-optical-center-algorithms]].
+
 **Model:** `ShadowModel` — a tilted band: `angle` (long-axis, rad), `offset` (perp distance from image center), `umbra_half_width`, `penumbra_half_width`, `depth`, `prominence`. The "long centerline" Arie asked for is just `(angle, offset)`; `.centerline_endpoints()`, `.masks()` (umbra/penumbra), `.mask()` (union) derive from it.
 
 **API:** `detect_mirror_shadow(image, reference=None, ...) -> ShadowModel` (always returns; check `.present`, so retracted-stage frames read as absent); `darken_shadow(image, model, fill=None, ...)` replaces the whole band with interpolated sky — kills the dip AND the bright-star leak-through ghosts (mirror is not fully opaque), i.e. the "mask before the pipeline" step; `plot_shadow(...)`.
