@@ -77,6 +77,15 @@ $\Delta x=\sqrt{D_{\min}^2((1+f)^2-1)/a}$.
 (`src/common/config/unit.py`; MAST_common submodule → sync). `src/app.py`/ps3cli
 unchanged.
 
+**Refinements (validated by autofocus-methods-research):** the `D²=ax²+bx+c` fit *is*
+the standard hyperbolic model — keep it, but use an **error-weighted** fit (N.I.N.A.'s
+default), not plain LSQ. HFD is a **relative focus index**, not absolute encircled-energy
+(don't treat it as a physical diameter). **Low-SNR caveat:** HFD can go **negative** on
+faint stars / noise valleys → require a solid local background + a min-SNR cut (matters at
+cold-start). Compute the **Critical Focus Zone** (CFZ ∝ ~f-ratio², so *tight* at f/3) to set
+the V-curve `spacing` and fine step. `near_axis_frac` is a **tunable** to calibrate
+empirically (the off-axis-coma cutoff is not quantified in the literature).
+
 **Files:** new `src/imaging/hfd.py`, `src/focus_analysis_hfd.py`; additive edits to
 `src/autofocusing.py` (shared-sweep helper + `do_start_hfd_autofocus`), `src/unit.py`,
 `src/common/activities.py`, `src/common/config/unit.py`.
@@ -111,9 +120,17 @@ Phase-1 V-curve (which becomes **Phase B, refinement**).
   module); an adaptive Phase-A controller in the sweep helper (direction-finding +
   coarse stepping) that precedes the fixed N-step V-curve. Phase B reuses Phase-1
   unchanged.
+- **Research caveats (autofocus-methods-research):** the qualitative donut picture and the
+  **differential intra/extra-focal sign disambiguation are validated** (same principle as
+  LSST/DECam). BUT the **quantitative donut-diameter-vs-defocus slope is NOT corroborated** —
+  do not assume linearity/range; **characterize it empirically/optically on our system**
+  before relying on a one-shot jump. The **blob-detector choice is open** (the DoG>LoG claim
+  was refuted) — evaluate threshold/connected-components vs a dedicated donut-radius estimator
+  on real donuts. (Spherical/coma asymmetry between the two donuts can *help* the sign.)
 - **Verification:** synthetic donut sequences (annuli whose diameter ∝ |offset|) →
   the slope-calibration move lands near focus and the sign is resolved; cold-start
-  test from a blank/blurred frame finds the regime.
+  test from a blank/blurred frame finds the regime; **measure the real slope** on a
+  captured intra/extra-focal series before trusting the jump.
 
 ---
 
@@ -146,9 +163,17 @@ Goal: seed each run so most are a short confirming V-curve, not a full sweep.
   backplate probe.
 - **Persistence:** per-unit config DB as an **accumulating/rolling point set**
   (distinct from replace-on-refresh geometric calibrations like optical center).
+- **Research caveat (autofocus-methods-research):** literature support for a *linear*
+  focus-vs-temperature law and for "mirror temp beats ambient" was **not corroborated**
+  (thin, forum-grade sources). So treat the linear form as a prior, **lean on the
+  data-driven rolling fit** (it self-calibrates from real runs and can be upgraded if
+  residuals demand), and keep **mirror-vs-ambient as an open question** — log both
+  (ambient is readable via EFA; mirror via PWI4 `status.raw`) and let the data pick the
+  better predictor.
 - **Verification:** feed a synthetic `(T, best_focus)` history → the robust fit
   recovers the slope and the maturity gate / ladder behave; with `get_mirror_temperature`
-  returning `None`, the ladder falls back cleanly.
+  returning `None`, the ladder falls back cleanly; once real data accrues, compare the
+  predictive power of mirror vs ambient temperature.
 
 ---
 

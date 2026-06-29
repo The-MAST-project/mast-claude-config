@@ -18,6 +18,7 @@
 - [Folding-mirror shadow detection (implemented)](mirror-shadow-detection-impl.md) — src/imaging/mirror_shadow.py: detect/mark/centerline/darken; good for DEEP shadows but poly absorbs WIDE bands → false-negatives on moderate (~8%) shadows (confirmed bug, fix prototyped); optical-center now recovers coma via flux-weighting
 - [Shadow & optical-center algorithms (logic/rationale)](mirror-shadow-optical-center-algorithms.md) — how/why: deficit ratio map, ±90° projection orientation sweep, false-positive gates, collar-matched sky fill, coma-null line-intersection fit, and the "mandate retraction, detect-as-guard" coupling decision
 - [Optical-center-from-coma literature](optical-center-coma-research.md) — deep-research validation of the coma-null method; key upgrade = coma is spin-1 (vector), add centroid-vs-peak + free-node fit + rho-stats; papers (JSJ 2008, Ma 2008, Schechter-Levinson 2009)
+- [Autofocus methods research](autofocus-methods-research.md) — HFD/V-curve choices validated (HFD estimator, D²=hyperbolic, coarse+vertex, differential sign); thermal model + donut-jump slope + DoG-detector NOT validated (empirical/data-driven); CFZ tight at f/3
 
 ### MAST_unit — mount guiding / solve_and_correct (2026-06-19)
 - [mount.is_moving is a slew detector](mount-is-moving-is-a-slew-detector.md) — axis rms_error>3"/1"; was misused as a settle gate (all such sites now migrated); definition now fits its slew-completion/telemetry uses
