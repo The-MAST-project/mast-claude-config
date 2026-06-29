@@ -155,12 +155,14 @@ Goal: seed each run so most are a short confirming V-curve, not a full sweep.
   ladder.
 - **`get_mirror_temperature() -> Optional[float]`:** stub returning `None` when no
   reading (never fabricate a constant); **timestamp captured at the call site** so a
-  stale reading can be rejected. PWI4 reality: the official `pwi4_client.py` parses
-  **no** temperature fields; EFA mirror/ambient temps exist inside PWI4 but the exact
-  `/status` keyword strings are **unconfirmed** — verify on a connected unit
-  (`curl /status | grep -i temp`). Candidate sources, best first: EFA primary-mirror
-  sensor; PWI4 `/status` keyword; PWI4 temperature CSV log; independent ESP32
-  backplate probe.
+  stale reading can be rejected. **PWI4 source CONFIRMED on-unit (PWI4 4.1.8, 2026-06-29):**
+  temps are **NOT** in `/status`; query **`GET http://localhost:8220/temperatures/pw1000`**
+  (the general temperature endpoint, despite the name), which returns
+  `temperature.primary` (primary MIRROR), `temperature.ambient`, `temperature.secondary`,
+  `temperature.m3` as `temperature.<sensor>=<°C>` lines, with **`-999.000` = no sensor →
+  map to `None`**. Read `temperature.primary` for the mirror seed and `temperature.ambient`
+  for the mirror-vs-ambient comparison. The official `pwi4_client.py` has no method for this
+  endpoint → add a one-line HTTP GET.
 - **Persistence:** per-unit config DB as an **accumulating/rolling point set**
   (distinct from replace-on-refresh geometric calibrations like optical center).
 - **Research caveat (autofocus-methods-research):** literature support for a *linear*
