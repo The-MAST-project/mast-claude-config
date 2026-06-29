@@ -32,4 +32,4 @@
 - [Modal form design policy](feedback_form_design.md) — horizontal layout: col-4 bold right-aligned label, col-8 input, row mb-2
 - [HTML indentation style](feedback_html_indentation.md) — 2-space indentation in all HTML templates, never tabs
 - [Post-change instructions](feedback_post_change_instructions.md) — always state restart/refresh needed after changes
-- [Weizmann HTTP proxy](feedback_weizmann_proxy.md) — http://bcproxy.weizmann.ac.il:8080; use as fallback only after direct git/curl access times out
+- [Weizmann HTTP proxy](feedback_weizmann_proxy.md) — http://bcproxy.weizmann.ac.il:8080; ALWAYS use for GitHub git access (direct always times out ~21s); env var, not git config
