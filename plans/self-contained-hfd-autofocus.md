@@ -25,6 +25,27 @@ Factor the sweep/capture loop out of `do_start_autofocus`; `start_autofocus` kee
 the ps3cli analyzer, `start_hfd_autofocus` uses the HFD analyzer; both return the
 same `PS3AutofocusStatus`. ps3cli (and its `app.py` launch) stay untouched.
 
+## Entry point — start-position policy (cross-phase)
+
+On `start_hfd_autofocus`, pick the starting regime from the config DB's cached focus
+(`unit_conf.focuser.known_as_good_position`, already persisted today):
+- **Known-good present/valid → V-curve directly** (Phase 1): center the sweep on it
+  (`known_good ± (N/2)·spacing`) and refine. This skips coarse acquisition — the
+  common, routine case.
+- **Known-good absent → coarse acquisition first** (Phase 2, Phase A: cold-start
+  coarse stepping → donut slope-jump) to reach near-focus, then hand off to the
+  V-curve.
+- **Staleness guardrail** (when seeding from known-good): take one frame and check
+  HFD is in the expected ballpark; if wildly off (focuser slipped / optics touched),
+  treat the cache as stale and fall back to coarse acquisition.
+- On success, write the new best focus back to `known_as_good_position` (existing
+  behavior) so the cache stays current.
+
+This is the simple precursor to the **Phase-3 thermal ladder**, which only refines the
+*seed value* (mirror temperature) — the cache-vs-coarse branch is the same skeleton.
+**Phasing note:** the "absent → coarse" branch needs Phase 2; until then, no-known-good
+falls back to requiring an explicit `start_position` (today's behavior).
+
 ---
 
 ## Phase 1 — Self-contained HFD V-curve (near-focus), parallel path  ← BUILD NOW
