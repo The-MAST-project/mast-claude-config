@@ -1,102 +1,137 @@
-# Self-contained HFD autofocus — a parallel path alongside ps3cli
+# HFD autofocus — phased plan (self-contained, parallel to ps3cli)
 
-> **Status: PLANNED (2026-06-29), not yet implemented.** Approved plan, archived for reference.
+> **Status: PLANNED (2026-06-29).** Phase 1 is the immediate, implementable scope;
+> Phases 2–3 are the roadmap (design intent + key algorithms), to be detailed/built
+> later. Archived approved plan.
 > **Guideline (Arie):** the HFD implementation lives **in parallel** to the current
 > ps3cli code (does not replace it); add a new endpoint `start_hfd_autofocus`.
 
 ## Context
 
-The MAST unit already has a working V-curve autofocus (`src/autofocusing.py`): it
-steps the focuser over N exposures (`FOCUSnnnnn.fits`, position encoded in the
-name), hands the files to **PlaneWave's external `ps3cli --server`** which returns
-a best-focus position + tolerance from a quadratic V-curve over each image's
-**star RMS diameter**, then persists `known_as_good_position`. A second path
-delegates to PWI4's native autofocus.
+The MAST unit already has a working V-curve autofocus (`src/autofocusing.py`): step
+the focuser over N exposures (`FOCUSnnnnn.fits`, position in the name), hand the
+files to PlaneWave's external **`ps3cli --server`** (best-focus + tolerance from a
+quadratic V-curve over each image's **star RMS diameter**), persist
+`known_as_good_position`. A second path delegates to PWI4's native autofocus.
 
-Per our self-calibration design (`unit-self-calibration-design` §1) we want a
-**self-contained, coma-robust HFD (half-flux diameter)** focus metric: no external
-ps3cli server / star catalog, and a scalar that stays well-behaved far from focus
-and tolerates the asymmetric PSFs an f/3 parabola produces (coma).
+Per our self-calibration design (`unit-self-calibration-design` §1/§4) we want a
+**self-contained, coma-robust HFD (half-flux diameter)** autofocus: no external
+ps3cli/catalog; a metric that tolerates the asymmetric PSFs an f/3 parabola
+produces; robust from far out of focus; and temperature-seeded so most runs are a
+short confirm. Built as a **parallel path** to ps3cli so the two can be A/B'd.
 
-**Goal:** add an HFD autofocus path that runs **in parallel** to the existing
-ps3cli path — same focuser sweep, different (in-process) analysis — exposed via a
-new `start_hfd_autofocus` endpoint. **ps3cli is left fully intact** as the default,
-enabling a direct A/B comparison before any switch of default.
+Architectural spine for all phases: **shared focuser sweep + pluggable analyzer**.
+Factor the sweep/capture loop out of `do_start_autofocus`; `start_autofocus` keeps
+the ps3cli analyzer, `start_hfd_autofocus` uses the HFD analyzer; both return the
+same `PS3AutofocusStatus`. ps3cli (and its `app.py` launch) stay untouched.
 
-## Design — parallel, analysis-pluggable
+---
 
-**Why parallel + key benefit:** because analysis is decoupled from capture (focuser
-position is in each filename), **both analyzers can run on the SAME captured sweep**
-— identical star field, no extra telescope time — for an apples-to-apples
-HFD-vs-ps3cli comparison.
+## Phase 1 — Self-contained HFD V-curve (near-focus), parallel path  ← BUILD NOW
 
-### Shared sweep, pluggable analyzer (recommended; avoids duplicating the loop)
-Factor the focuser-sweep + exposure-capture loop in `do_start_autofocus` into a
-shared helper that takes an **analyzer callable** returning `PS3AutofocusStatus`:
-- `start_autofocus` (existing) → analyzer = ps3cli `analyze_focus_files` (default; behavior unchanged).
-- `start_hfd_autofocus` (new) → analyzer = the new HFD `analyze_focus_files_hfd`.
-Both share capture, plotting, persistence (`known_as_good_position`), `latest_result`,
-and retry logic. (Fallback if zero edits to the existing method are required: a
-sibling `do_start_hfd_autofocus` duplicating the loop — avoid if possible.)
+**Key benefit of parallel:** analysis is decoupled from capture (position is in the
+filename), so **both analyzers run on the SAME captured sweep** — identical star
+field, no extra telescope time — for an apples-to-apples HFD-vs-ps3cli comparison.
 
-### New: `src/imaging/hfd.py` — the metric
+### New `src/imaging/hfd.py` — the metric
 Reuse the photutils detection pattern from `src/imaging/optical_center.py`.
-- `half_flux_diameter(stamp, cx, cy, r_out)` — per star, on the background-subtracted,
-  negative-clamped stamp: $\text{HFD} = 2\,\dfrac{\sum_i v_i\, r_i}{\sum_i v_i}$
-  within `r_out` ($r_i$ = distance from centroid). Robust, asymmetry-tolerant.
+- `half_flux_diameter(stamp, cx, cy, r_out)` — per star, background-subtracted,
+  negative-clamped: $\text{HFD}=2\,\dfrac{\sum_i v_i r_i}{\sum_i v_i}$ within `r_out`.
 - `frame_hfd(image, ...) -> (hfd_median, n_stars)` — detect sources; **restrict to
-  near-axis stars** (coma inflates off-axis HFD) via a central radius fraction
-  (`near_axis_frac`; geometric center, since the optical center is unknown during
-  focus); robust median HFD over kept stars; reject saturated/blended/too-small.
+  near-axis stars** (coma inflates off-axis HFD) via `near_axis_frac` about the
+  geometric center (optical center unknown during focus); robust median; reject
+  saturated/blended/too-small.
 
-### New: `src/focus_analysis_hfd.py` — the HFD analyzer (parallel to `focus_analysis.py`)
-- `analyze_focus_files_hfd(files, ...) -> PS3AutofocusStatus` — **reuses the existing
-  Pydantic models** from `focus_analysis.py` (`PS3FocusSample` / `PS3FocusAnalysisResult`
-  / `PS3AutofocusStatus`) so it is a drop-in for the orchestrator. `focus_analysis.py`
-  itself is **untouched**.
-  1. Per file: parse focus position from the `FOCUSnnnnn` name (fallback `FOCUSPOS`
-     header) → `frame_hfd` → `PS3FocusSample` (HFD in `star_rms_diameter_pixels`).
-  2. V-curve: fit $D^2 = a x^2 + b x + c$ via `np.polyfit(x, D**2, 2)` (linear LSQ;
-     matches `vcurve_a/b/c`). Require $a>0$; best $x^\*=-b/2a$; $D_{\min}=\sqrt{c-b^2/4a}$.
-  3. Tolerance: offset where fitted diameter rises by $f$ (e.g. 2.5 %):
-     $\Delta x=\sqrt{D_{\min}^2((1+f)^2-1)/a}$.
-  4. Return `PS3AutofocusStatus(is_running=False, analysis_result=…, errors=…)`;
-     reuse `FocusAnalysisError` semantics so retry logic still applies.
+### New `src/focus_analysis_hfd.py` — the analyzer (parallel to `focus_analysis.py`)
+`analyze_focus_files_hfd(files, ...) -> PS3AutofocusStatus`, **reusing the existing
+Pydantic models** so it drops into the orchestrator (`focus_analysis.py` untouched):
+parse position from `FOCUSnnnnn` (fallback `FOCUSPOS` header) → `frame_hfd` per file
+→ fit $D^2=ax^2+bx+c$ via `np.polyfit(x, D**2, 2)` (linear LSQ; matches `vcurve_a/b/c`),
+require $a>0$, best $x^\*=-b/2a$, $D_{\min}=\sqrt{c-b^2/4a}$, tolerance
+$\Delta x=\sqrt{D_{\min}^2((1+f)^2-1)/a}$.
 
-### Plumbing (all additive)
-- **Endpoint**: `POST /mast/api/v1/unit/start_hfd_autofocus` (+ have `stop_autofocus`
-  cover it, or add `stop_hfd_autofocus`) in `src/unit.py` / `Autofocuser`.
-- **Activity flag**: `UnitActivities.HfdAutofocusing` (parallel to `Autofocusing`) in
-  `src/common/activities.py`, so telemetry/Grafana distinguishes the two.
-- **Config**: a parallel HFD block (or sub-section) in `AutofocusConfig`
-  (`src/common/config/unit.py`): `nsigma`, `min_stars`, `near_axis_frac`, `hfd_r_out`,
-  tolerance fraction — independently tunable during the bake-off. (`src/common/` is the
-  `MAST_common` submodule → sync to other checkouts.)
-- **`src/app.py` / ps3cli**: **unchanged** — the ps3cli server keeps launching; both
-  paths coexist.
+### Plumbing (additive)
+`start_hfd_autofocus` endpoint (`src/unit.py`), `UnitActivities.HfdAutofocusing`
+(`src/common/activities.py`), HFD config block in `AutofocusConfig`
+(`src/common/config/unit.py`; MAST_common submodule → sync). `src/app.py`/ps3cli
+unchanged.
 
-## Files
+**Files:** new `src/imaging/hfd.py`, `src/focus_analysis_hfd.py`; additive edits to
+`src/autofocusing.py` (shared-sweep helper + `do_start_hfd_autofocus`), `src/unit.py`,
+`src/common/activities.py`, `src/common/config/unit.py`.
 
-- **New**: `src/imaging/hfd.py` (metric), `src/focus_analysis_hfd.py` (HFD analyzer; reuses focus_analysis.py models).
-- **Modify (additive)**: `src/autofocusing.py` (shared-sweep helper + `start_hfd_autofocus` / `do_start_hfd_autofocus`), `src/unit.py` (new endpoint), `src/common/activities.py` (`HfdAutofocusing`), `src/common/config/unit.py` (HFD config; submodule-synced).
-- **Untouched**: `src/focus_analysis.py`, `src/app.py` (ps3cli launch), the existing `start_autofocus` behavior, PWI4-native path.
-- **Reuse**: photutils detection from `src/imaging/optical_center.py`; replay harness `tests/autofocus/validate_autofocus_solve.py`.
+**Verification:** (1) **A/B on the same files** — extend `tests/autofocus/validate_autofocus_solve.py`
+to run both analyzers over real `FOCUS*.fits`, compare best-focus/tolerance;
+(2) synthetic Gaussian-defocus sequence recovers the injected vertex; (3) HFD rises
+off-axis (coma) confirming the near-axis cut; (4) manual end-to-end `start_hfd_autofocus`
+with ps3cli still available.
 
-## Verification
+---
 
-1. **A/B on the SAME files (headline)**: extend the replay harness to run **both**
-   `analyze_focus_files` (ps3cli) and `analyze_focus_files_hfd` over the same captured
-   `Autofocus/{NNNN}/FOCUS*.fits` bundles; compare best-focus + tolerance — expect
-   agreement within the tolerance band.
-2. **Synthetic sequence**: Gaussian PSFs whose width varies with a known defocus
-   offset, across focuser positions; assert the HFD analyzer recovers the injected
-   vertex and HFD rises monotonically away from it.
-3. **HFD sanity**: HFD increases off-axis at fixed focus (coma) — confirms the
-   near-axis restriction; median stable vs star count.
-4. **End-to-end (manual, on a unit)**: call `start_hfd_autofocus`; confirm it sweeps,
-   converges, and persists `known_as_good_position` — with ps3cli still available for
-   the existing endpoint.
+## Phase 2 — Far-from-focus robustness (two-phase acquisition)  ← LATER
 
-## Out of scope (future, per design §1/§4)
-Two-phase acquisition / cold-start / donut handling for far-from-focus, and the
-thermal (mirror-temperature) focus-seed model — separate plans.
+Phase 1 assumes you start **near** focus (point sources extractable). Starting wildly
+out of focus, stars are large **donuts** (central-obstruction shadow) or sky-limited
+blur, and point-source HFD breaks. Add a **Phase A (acquisition)** ahead of the
+Phase-1 V-curve (which becomes **Phase B, refinement**).
+
+- **Donut regime metric (not SEP point sources):** detect **blobs** via
+  connected-components/threshold (donuts are large and may blend). The donut **outer
+  diameter ≈ linear in focuser offset** (slope set by f-ratio + pixel scale). One
+  **differential focuser move** calibrates the slope → jump to near-focus in ~one
+  shot. Donut size gives **magnitude but not sign** (inside vs outside focus look
+  identical) → the differential move **disambiguates direction**. "Getting warmer"
+  signal: blob count + above-threshold area both rise toward focus.
+- **Cold start:** if nothing extracts at all (sky-limited blur), step the focuser in
+  **coarse increments** until blobs/sources appear, then enter the donut regime.
+- **Hand-off A→B:** when point sources become extractable and HFD is measurable,
+  switch to the Phase-1 HFD V-curve for the precise vertex.
+- **New pieces:** a donut/blob metric in `src/imaging/hfd.py` (or a `focus_metrics`
+  module); an adaptive Phase-A controller in the sweep helper (direction-finding +
+  coarse stepping) that precedes the fixed N-step V-curve. Phase B reuses Phase-1
+  unchanged.
+- **Verification:** synthetic donut sequences (annuli whose diameter ∝ |offset|) →
+  the slope-calibration move lands near focus and the sign is resolved; cold-start
+  test from a blank/blurred frame finds the regime.
+
+---
+
+## Phase 3 — Thermal focus-seed model  ← LATER
+
+Best focus drifts with temperature (tube/focuser expansion; large WAO day-night
+swing); **mirror temperature predicts better than ambient** (mirror lags ambient).
+Goal: seed each run so most are a short confirming V-curve, not a full sweep.
+
+- **Model:** `seed = offset + slope · T_mirror` (linear; resist higher-order — sparse
+  points overfit). **Robust/sigma-clipped** fit over a **rolling, recency-weighted**
+  training set of `(mirror_temp, best_focus, timestamp, quality)` — one point
+  **appended per successful autofocus** (Phase 1/2), so it self-calibrates and tracks
+  drift. **Keyed per `(unit, config-epoch)`**; also store **altitude** as an
+  (initially unused) covariate for later flexure analysis.
+- **Maturity gate:** trust the slope only with **≥N points spanning ≥ΔT**; below that
+  use the **most-recent good focus as a flat seed**.
+- **Degradation ladder:** (a) mature model + temp → predicted seed → short V-curve;
+  (b) temp `None` but recent good focus → flat seed (wider V-curve); (c) neither →
+  full Phase-A acquisition. **Guardrail across all:** take one image first and check
+  HFD is in the expected ballpark; if wildly off, the seed is stale → fall down the
+  ladder.
+- **`get_mirror_temperature() -> Optional[float]`:** stub returning `None` when no
+  reading (never fabricate a constant); **timestamp captured at the call site** so a
+  stale reading can be rejected. PWI4 reality: the official `pwi4_client.py` parses
+  **no** temperature fields; EFA mirror/ambient temps exist inside PWI4 but the exact
+  `/status` keyword strings are **unconfirmed** — verify on a connected unit
+  (`curl /status | grep -i temp`). Candidate sources, best first: EFA primary-mirror
+  sensor; PWI4 `/status` keyword; PWI4 temperature CSV log; independent ESP32
+  backplate probe.
+- **Persistence:** per-unit config DB as an **accumulating/rolling point set**
+  (distinct from replace-on-refresh geometric calibrations like optical center).
+- **Verification:** feed a synthetic `(T, best_focus)` history → the robust fit
+  recovers the slope and the maturity gate / ladder behave; with `get_mirror_temperature`
+  returning `None`, the ladder falls back cleanly.
+
+---
+
+## Phasing rationale
+Phase 1 delivers an offline, coma-robust analyzer A/B-able against ps3cli today.
+Phase 2 makes it reliable from any starting defocus. Phase 3 makes routine runs cheap
+and drift-aware. Each phase stands alone and slots into the same pluggable-sweep spine.
