@@ -1,8 +1,8 @@
 # HFD autofocus — phased plan (self-contained, parallel to ps3cli)
 
-> **Status: PLANNED (2026-06-29).** Phase 1 is the immediate, implementable scope;
-> Phases 2–3 are the roadmap (design intent + key algorithms), to be detailed/built
-> later. Archived approved plan.
+> **Status: PLANNED (2026-06-29; Phase 0 + near-axis emphasis added 2026-06-30).**
+> Phase 0 (assess) + Phase 1 are the immediate scope (Phase 0's far→donut routing
+> completes with Phase 2); Phases 2–3 are the roadmap. Archived approved plan.
 > **Guideline (Arie):** the HFD implementation lives **in parallel** to the current
 > ps3cli code (does not replace it); add a new endpoint `start_hfd_autofocus`.
 
@@ -35,9 +35,10 @@ On `start_hfd_autofocus`, pick the starting regime from the config DB's cached f
 - **Known-good absent → coarse acquisition first** (Phase 2, Phase A: cold-start
   coarse stepping → donut slope-jump) to reach near-focus, then hand off to the
   V-curve.
-- **Staleness guardrail** (when seeding from known-good): take one frame and check
-  HFD is in the expected ballpark; if wildly off (focuser slipped / optics touched),
-  treat the cache as stale and fall back to coarse acquisition.
+- **Regime confirmed by Phase 0:** the seed only chooses *where* to take the first
+  exposure; **Phase 0 (Assess)** then classifies the actual frame and routes. A stale
+  known-good that returns a wildly-off / donut frame is simply classified "far" and
+  sent to acquisition — no special-case staleness guardrail needed.
 - On success, write the new best focus back to `known_as_good_position` (existing
   behavior) so the cache stays current.
 
@@ -45,6 +46,32 @@ This is the simple precursor to the **Phase-3 thermal ladder**, which only refin
 *seed value* (mirror temperature) — the cache-vs-coarse branch is the same skeleton.
 **Phasing note:** the "absent → coarse" branch needs Phase 2; until then, no-known-good
 falls back to requiring an explicit `start_position` (today's behavior).
+
+---
+
+## Phase 0 — Assess (regime triage)  ← runs first, one cheap frame
+
+Before any sweep, take **one exposure** at the seed position (from the start-position
+policy — known-good if present, else a nominal mid-travel position) and classify the
+focus regime from that single frame, then route:
+- **Near focus** — point sources extract and the **near-axis** median HFD sits within a
+  near-focus band (≲ a few × the in-focus HFD) → go straight to **Phase 1** (V-curve),
+  centering the sweep here.
+- **Far defocus (donuts)** — sources are large **annular blobs** (central dark hole) /
+  HFD or above-threshold blob area very large → **Phase 2** donut acquisition, then Phase 1.
+- **Nothing extracts** (sky-limited blur / wild defocus) → **Phase 2 cold-start** coarse
+  stepping until structure appears.
+
+Classification signals, all from the one frame: extracted point-source count + median
+**near-axis** HFD vs a near-focus threshold; donut/annular morphology (central minimum)
+or large above-threshold blob area. This **subsumes the staleness guardrail** — a stale
+known-good seed just classifies as "far" and routes to acquisition.
+
+New piece: `assess_focus_regime(image) -> {"near"|"far"|"empty"}` in `src/imaging/hfd.py`
+(reuses `frame_hfd` + a blob/annulus check), called by the sweep helper to pick V-curve
+vs acquisition. **Phasing note:** the **near vs not-near** decision is implementable in
+Phase 1 (route "near"→V-curve, else report "not near focus" / fall back to an explicit
+`start_position`); the **far→donut / empty→cold-start** routing lands with Phase 2.
 
 ---
 
@@ -59,9 +86,13 @@ Reuse the photutils detection pattern from `src/imaging/optical_center.py`.
 - `half_flux_diameter(stamp, cx, cy, r_out)` — per star, background-subtracted,
   negative-clamped: $\text{HFD}=2\,\dfrac{\sum_i v_i r_i}{\sum_i v_i}$ within `r_out`.
 - `frame_hfd(image, ...) -> (hfd_median, n_stars)` — detect sources; **restrict to
-  near-axis stars** (coma inflates off-axis HFD) via `near_axis_frac` about the
-  geometric center (optical center unknown during focus); robust median; reject
-  saturated/blended/too-small.
+  near-axis stars and AVOID THE IMAGE MARGINS** where coma is pronounced, via
+  `near_axis_frac` about the geometric center (optical center unknown during focus);
+  robust median; reject saturated/blended/too-small. Rationale: in this f/3
+  coma-driven system coma is a **focus contaminant** — it inflates and asymmetrizes
+  off-axis HFD — so we use the well-behaved central stars. This is the **deliberate
+  opposite** of `find_optical_center`, which selects *margin* stars because there coma
+  is the signal, not noise.
 
 ### New `src/focus_analysis_hfd.py` — the analyzer (parallel to `focus_analysis.py`)
 `analyze_focus_files_hfd(files, ...) -> PS3AutofocusStatus`, **reusing the existing
@@ -180,6 +211,8 @@ Goal: seed each run so most are a short confirming V-curve, not a full sweep.
 ---
 
 ## Phasing rationale
-Phase 1 delivers an offline, coma-robust analyzer A/B-able against ps3cli today.
-Phase 2 makes it reliable from any starting defocus. Phase 3 makes routine runs cheap
-and drift-aware. Each phase stands alone and slots into the same pluggable-sweep spine.
+Phase 0 triages one cheap frame to route near→V-curve vs far→acquisition (avoiding a
+blind sweep). Phase 1 delivers an offline, coma-robust analyzer A/B-able against ps3cli
+today. Phase 2 makes it reliable from any starting defocus. Phase 3 makes routine runs
+cheap and drift-aware. Each phase stands alone and slots into the same pluggable-sweep
+spine.
