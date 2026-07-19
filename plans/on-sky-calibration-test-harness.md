@@ -3,7 +3,7 @@
 > Status: **plan only — not implemented.** Supersedes and absorbs
 > `on-sky-autofocus-test-harness.md` (now just the *focus-phase* deep dive /
 > donut-physics characterisation). Validates the flow in
-> `MAST_unit/docs/calibration_orchestration.md`: `/calibrate` and the phase
+> `calibration_orchestration.md` (this folder): `/calibrate` and the phase
 > endpoints `/calibrate/{focuser,optical_center,stage}`.
 >
 > **Scope (this rev, 2026-07-19): real sky only.** A synthetic-injection tier
