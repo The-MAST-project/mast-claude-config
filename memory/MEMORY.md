@@ -6,6 +6,7 @@ durable engineering knowledge belongs in each repo's `CLAUDE.md` / `docs/`, and
 in-progress or machine-local notes stay in each developer's local `~/.claude` memory.
 
 ## Project
+- [SwitchedOutlet polish plan](switched-outlet-polish-plan.md) — PLANNED after calibration works: own PR against MAST_common main; ranked defects (tri-state collapse, silent power_on_or_off, dead _from_group, hostname fallback); mechanical-then-behavioural staging, tests first, cross-repo call-site survey
 - [`Mount.is_moving` is a tracking-quality signal, not a motion one](mount-is-moving-is-a-slew-detector.md) — MAST_unit; PWI4 rms thresholds mirror the GUI, so in wind it reads True while parked on target and `while mount.is_moving` stalls
 
 ## Feedback
