@@ -5,6 +5,9 @@ context, design plans, and machine-specific notes deliberately do NOT live here 
 durable engineering knowledge belongs in each repo's `CLAUDE.md` / `docs/`, and
 in-progress or machine-local notes stay in each developer's local `~/.claude` memory.
 
+## Project
+- [`Mount.is_moving` is a tracking-quality signal, not a motion one](mount-is-moving-is-a-slew-detector.md) — MAST_unit; PWI4 rms thresholds mirror the GUI, so in wind it reads True while parked on target and `while mount.is_moving` stalls
+
 ## Feedback
 - [Comment out, don't delete, when disabling temporarily](feedback_comment_dont_delete.md) — preserves position for re-enablement
 - [Never run git writes/pushes unprompted](feedback_no_unprompted_git_writes.md) — no commit/push/rm/reset/rebase/tag without an explicit request in the current turn; read-only git is fine
