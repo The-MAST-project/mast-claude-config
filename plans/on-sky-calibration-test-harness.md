@@ -82,7 +82,7 @@ The orchestration wiring, checked by observing real runs + controlled DB edits
 (no simulated unit in this rev):
 
 - **Order:** `/calibrate` runs `focuser → optical_center → stage` (assert from the
-  decision trace).
+  debug log).
 - **Prerequisite fail:** delete `calibration.optical_center` from the DB, call
   `/calibrate/stage` standalone → expect a clean error, not a guess. Same for
   `/calibrate/optical_center` with no `calibration.focuser.best_position`.
@@ -90,7 +90,7 @@ The orchestration wiring, checked by observing real runs + controlled DB edits
   `force=true` or product deleted → runs.
 - **Hardware made-to-happen:** each phase slews to the resolved coord, calls
   `stage.home()` (focus/optical_center), sets `focuser.position` — assert from the
-  trace, with no inter-phase carry-over assumed.
+  debug log, with no inter-phase carry-over assumed.
 - **Activities / single-flight:** umbrella `Calibrating` on `/calibrate`, per-phase
   `Calibrating{Focus,OpticalCenter,Stage}`; a second start while any is active is
   rejected.
@@ -109,9 +109,13 @@ One dated folder (mirroring `Autofocus/<NNNN>/`):
   per exposure: focuser + stage position, mount alt/az + RA/Dec, mirror & ambient
   temperature, exposure/gain/binning/ROI. **Record the `guiding.rois.fcu_v2`
   reference** used for the optical-center delta.
-- **`decisions.jsonl`** — order, skip-because-present, prerequisite checks, regime
-  transitions, every focuser/stage/mount command + reason, gate pass/fail, DB
-  writes.
+- **The decision trace goes to the ordinary debug log**, not a per-run file: each
+  phase `logger.debug`s order, skip-because-present, prerequisite checks, regime
+  transitions, every focuser/stage/mount command + reason, gate pass/fail and DB
+  writes as it goes. Logs already rotate daily under `%LOCALAPPDATA%/mast/<date>/`
+  (`common.mast_logging`), so the trace is captured per unit and per night without
+  a bespoke writer. Flow-level assertions (order, skip, prerequisite failure) are
+  therefore made by reading the log for the run's window rather than parsing JSON.
 - **`calibration_products.json`** — the `calibration.{focuser,optical_center,
   stage}` records written this run + their quality fields.
 - **`analysis.json`** — per-frame analyzer outputs (focus: HFD/ps3cli/PWI4;

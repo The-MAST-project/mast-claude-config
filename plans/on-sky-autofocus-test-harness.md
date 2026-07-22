@@ -101,9 +101,12 @@ One dated folder per run (mirroring today's `Autofocus/<NNNN>/`), containing:
   exposure: focuser position, timestamps, mount alt/az + RA/Dec, **mirror &
   ambient temperature** (PWI4 `/temperatures/pw1000`: `temperature.primary` /
   `.ambient`, `-999` → null), exposure/gain/binning/ROI, FWHM-ish seeing proxy.
-- **`decisions.jsonl`** — the routine's decision trace: Phase-0 verdict, regime
-  transitions, every focuser command + reason (e.g. "donut jump −1400 from slope",
-  "V-curve not bracketed → shift +150"), retries.
+- **The decision trace goes to the ordinary debug log**, not a per-run file: the
+  routine `logger.debug`s the Phase-0 verdict, regime transitions, every focuser
+  command + reason (e.g. "donut jump −1400 from slope", "V-curve not bracketed →
+  shift +150") and retries as it goes. Logs already rotate daily under
+  `%LOCALAPPDATA%/mast/<date>/` (`common.mast_logging`), so no bespoke writer is
+  needed.
 - **`analysis.json`** — per-frame outputs of **all** analyzers on the same frames
   (HFD, ps3cli, PWI4-native) + each method's final best-focus/tolerance.
 - **`report.png/html`** — V-curve, donut-diameter-vs-offset, convergence trace,
