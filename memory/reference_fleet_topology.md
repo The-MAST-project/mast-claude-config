@@ -6,9 +6,9 @@ type: reference
 
 **Sites & machines (as of 2026-07-25, interim buildout):**
 - **NS (Neot Smadar)** subnet `10.23.1.0/24`: units **mast00** `10.23.1.74`, **mast02** `10.23.1.102`; **mast-ns-control** `10.23.1.181` (Ubuntu, Samba). Also **mast-ns-spec** (Windows) `10.23.1.182` — `Z:` mapped to `\\10.23.1.181\mast-share` (persistent, creds mast/physics), `common` at `7a84400`. Gateway `10.23.1.254`.
-- **WIS (Weizmann)** subnet `10.23.3.0/24`: unit **mastw** `10.23.3.72`. Gateway `10.23.3.254`. mast-wis-control + a WIS spec are being installed (not up yet).
+- **WIS (Weizmann)** subnet `10.23.3.0/24`: unit **mastw** `10.23.3.72`; **mast-wis-control** `10.23.3.73` (being installed — not yet serving a share). A WIS spec is also planned. Gateway `10.23.3.254`.
 
-**Naming caveat:** the NS control box's hostname **is** `mast-ns-control` (verified 2026-07-25: `hostnamectl` / `hostname -f` / `/etc/hostname` all say `mast-ns-control.weizmann.ac.il`), at `10.23.1.181`, running the Samba `mast-share`. The only leftover is a **stale `/etc/hosts` line** — `127.0.0.1  mast-wis-control  mast-wis-control.weizmann.ac.il` (the box's former name) — so resolving `mast-wis-control` on it wrongly returns 127.0.0.1. (A Claude Code session's cached environment also showed the stale `mast-wis-control` name; trust `hostnamectl`, not the session banner.)
+**Naming:** the NS control box's hostname **is** `mast-ns-control` (`10.23.1.181`, running the Samba `mast-share`). Its `/etc/hosts` was corrected 2026-07-25 (the old `mast-wis-control → 127.0.0.1` line was removed), so resolution is now consistent: `mast-ns-control` → this box, `mast-wis-control` → `10.23.3.73` (WIS control). Note: a Claude Code session's cached environment banner may still show the stale `mast-wis-control` name — trust `hostnamectl`, not the banner.
 
 **mast-share (Samba on mast-ns-control / 10.23.1.181):** share `mast-share`, `security=user`, `guest ok = no`, `map to guest = bad user`, `valid users = mast`. Working creds: **user `mast`, password `physics`** (verified via smbclient). On Windows units it maps to drive **Z:** (`Filer.shared` = `Z:/MAST/<host>` when Z: mapped, else falls back to local `C:/MAST`). `D:` = RAM disk on units (real ramdisk), but on **mast-ns-spec `D:` is a plain local disk** (persistent), not a ramdisk.
 
