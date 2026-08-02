@@ -13,3 +13,6 @@ in-progress or machine-local notes stay in each developer's local `~/.claude` me
 - [Post-change instructions](feedback_post_change_instructions.md) — after code/config changes, state what's needed: restart backend / restart Django / refresh page
 - [SSH key auth on Windows](feedback_ssh_windows.md) — add public keys to `C:\ProgramData\ssh\administrators_authorized_keys`, not the per-user file
 - [Weizmann HTTP proxy](feedback_weizmann_proxy.md) — route GitHub git access through `http://bcproxy.weizmann.ac.il:8080` (direct always times out); env var, not git config
+
+## Reference
+- [Integration branch per MAST repo](reference_repo_branches.md) — `MAST_common`/`MAST_control`/`MAST_spec` integrate on `master`, the rest on `main`; single `origin` remote, no `upstream`
