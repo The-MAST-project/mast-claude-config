@@ -7,6 +7,7 @@ in-progress or machine-local notes stay in each developer's local `~/.claude` me
 
 ## Reference
 - [MAST fleet topology](reference_fleet_topology.md) — machines/IPs/sites, mast-share Samba (creds mast/physics), per-host SSH access, Windows per-session drive-mapping gotcha
+- [Integration branch per MAST repo](reference_repo_branches.md) — `MAST_common`/`MAST_control`/`MAST_spec` integrate on `master`, the rest on `main`; single `origin` remote, no `upstream`
 
 ## Project
 - [Prometheus monitoring of the Windows fleet](project_prometheus_windows.md) — windows_exporter on units, Prometheus on the control machine; onboarding steps
