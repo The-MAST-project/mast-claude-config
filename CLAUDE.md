@@ -30,4 +30,9 @@ truly global items (proxy, working-style) stayed.
 
 - `skills/` — reusable Claude Code skills (`/wip-commit`, `/wip-status`, `/sync-units`)
 - `memory/` — shared, cross-cutting memories only (working-style, project-wide facts)
+- `plans/` — design notes that span repos or predate their home repo
+- `code-validation-and-ci-guidelines.md` — linting, testing and CI standards for every
+  MAST repo: the platform matrix, CI job layout, the test-suite process-launch guard,
+  how to burn down lint debt, and per-rule policies. Applied to `MAST_common` and
+  `MAST_unit`; **read it before adding CI to `MAST_spec`, `MAST_control` or `MAST_gui`.**
 - `CLAUDE.md` — this file: what belongs here vs. in a per-repo `CLAUDE.md`
