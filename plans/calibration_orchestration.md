@@ -23,7 +23,8 @@ under an activity (below), pollable via `/status` and abortable. Every phase
 move, focuser move, regime choice, skip-because-present, prerequisite check, gate
 pass/fail, DB write. This debug log **is** the decision trace: there is no
 separate per-run trace file, and the daily rotation in `common.mast_logging`
-(`%LOCALAPPDATA%/mast/<date>/`) is what preserves it per unit and per night.
+(`<share>/<observing-night>/mast-<role>-log.txt`, i.e. `Z:/MAST/<hostname>/...`) is what
+preserves it per unit and per night.
 Outcomes a human needs without turning on debug — phase start/end, the solved
 value, failures — stay at `info`/`error`.
 

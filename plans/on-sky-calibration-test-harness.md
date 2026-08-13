@@ -112,9 +112,11 @@ One dated folder (mirroring `Autofocus/<NNNN>/`):
 - **The decision trace goes to the ordinary debug log**, not a per-run file: each
   phase `logger.debug`s order, skip-because-present, prerequisite checks, regime
   transitions, every focuser/stage/mount command + reason, gate pass/fail and DB
-  writes as it goes. Logs already rotate daily under `%LOCALAPPDATA%/mast/<date>/`
-  (`common.mast_logging`), so the trace is captured per unit and per night without
-  a bespoke writer. Flow-level assertions (order, skip, prerequisite failure) are
+  writes as it goes. Logs already rotate daily onto the share, at
+  `<share>/<observing-night>/mast-<role>-log.txt` (`common.mast_logging`), so the trace is
+  captured per unit and per night without a bespoke writer -- and is readable from the
+  control machine rather than only on the unit. Flow-level assertions (order, skip,
+  prerequisite failure) are
   therefore made by reading the log for the run's window rather than parsing JSON.
 - **`calibration_products.json`** — the `calibration.{focuser,optical_center,
   stage}` records written this run + their quality fields.
