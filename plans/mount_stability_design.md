@@ -54,25 +54,44 @@ table `sensors.ims232` is an Israel Meteorological Service feed from ~2 km away 
 km/h and no conversion is needed when consuming the column.
 
 It is quantised in 1.6 steps (3.2, 4.8, 6.4, 8.0, 9.7, 11.3, 12.9 …), which is 1 mph =
-1.609 km/h: the Davis is configured in mph internally and the value is converted on the way
-in. That is an artifact worth knowing — it means the true resolution is ~1.6 km/h, so a
-threshold set to 16 km/h and one set to 17 km/h select exactly the same readings — but it
-does **not** mean the stored number needs converting. *The quantisation is observed; the
-mph explanation is inferred from it. Confirm at the Davis console before hard-coding a
-threshold near a step boundary.*
+1.609 km/h. The Davis protocol confirms why: the LOOP packet's Wind Speed field (offset 14)
+is *"a byte unsigned value in **mph**"*, so the station reports integer mph and something in
+the ingest multiplies by 1.609 before storing. The stored column is km/h; the step size is
+the mph origin showing through. It means the true resolution is ~1.6 km/h, so a threshold of
+16 km/h and one of 17 km/h select exactly the same readings — **place thresholds on step
+values, not between them.**
 
 **`wind_direction` needs two filters, or it is garbage.**
 
-- **32767 is a no-data sentinel** (int16 max), not a bearing. Filter
-  `wind_direction between 0 and 360`.
+- **Valid range is 1–360, and `0` means NO DATA — not North.** The LOOP packet's Wind
+  Direction field (offset 16, 2 bytes) is documented as *"a two byte unsigned value from 1
+  to 360 degrees. (0° is no wind data, 90° is East, 180° is South, 270° is West and 360° is
+  north)"*. So filter **`wind_direction between 1 and 360`**. An earlier revision of this
+  document said `between 0 and 360`, which would silently count no-data rows as North; the
+  observed minimum in `sensors.davis` is 3.0, so no zeros are present and the results in
+  §2.5 are unaffected — but the filter as written was wrong and would bite whoever copied it.
 - **Direction is meaningless when the speed is zero** — 134,956 such rows in the study
   period. Filter `wind_speed > 0` for any direction analysis, or the rose is dragged
   toward whatever the vane rests at.
 
-Resolution is ~1°. **Meteorological convention is assumed** — 246° meaning wind *from* the
-WSW, which is the near-universal standard and what Davis reports. *Not confirmed at the
-console. If it were "toward", every bearing flips 180° and every broadside calculation in
-§5 inverts — silently and confidently. Worth ten seconds to check.*
+**The 32767 sentinel is ours, not Davis's.** The protocol documents no dashed value for wind
+direction — `0` covers it — and the dashed value for the other two-byte fields is 255. Wind
+speed is a *one-byte* field and cannot produce 32767 either. 32767 is `0x7FFF`, the classic
+invalid fill for a signed 16-bit field, so it is being introduced by whatever writes
+`sensors.davis` — presumably storing direction as int16 and filling when it has nothing.
+Worth knowing because it is a property of the ingest and could change if the logger does,
+whereas the `0` = no-data rule is fixed by the protocol.
+
+Resolution is ~1°. **Meteorological convention is still assumed** — 246° meaning wind *from*
+the WSW. Searching all 60 pages of the Vantage Serial Protocol Reference (Rev 2.6.1) for
+"coming from", "blowing", "from which" and "direction the wind" returns **nothing**: the
+document defines the compass mapping and never states the convention. The meteorological
+reading is a very safe assumption — it is the universal standard, it is what every
+Davis-consuming project assumes, and a vane physically points into the wind — but *it is not
+confirmed by Davis documentation.* If it were "toward", every bearing flips 180° and every
+broadside calculation in §5 inverts, silently. **The definitive check is physical**: on a
+windy evening compare the reported bearing against which way the vane points, or against the
+known prevailing SW–WSW flow with a handheld compass.
 
 ### 2.2 The diurnal curve
 
@@ -473,11 +492,15 @@ detector**, and a windy night that cannot be observed on is exactly when to run 
   establishable. (The Davis table itself is 60 s — see §2.)
 - **What threshold does the safety system already use** for `is_safe` on wind-speed? That
   is an existing, operationally-validated number and the natural anchor.
-- **Confirm the 1.6 km/h quantisation** at the Davis console (§2.1) — the column is km/h,
-  but the step size limits how finely a threshold can be placed.
-- **Confirm `wind_direction` is "from", not "toward"** (§2.1). Everything in §2.5 and the
-  broadside binning in §5.4 inverts if it is the other convention, and nothing in the data
-  would reveal the mistake.
+- **Confirm `wind_direction` is "from", not "toward"** (§2.1). *Checked against the Davis
+  Vantage Serial Protocol Reference Rev 2.6.1 and it is not documented there* — the protocol
+  gives the compass mapping and never states the convention. Everything in §2.5 and the
+  broadside binning in §5.4 inverts if it is the other way, and nothing in the data would
+  reveal the mistake. **Resolve it physically**: watch the vane on a windy evening, or take a
+  handheld compass bearing against the prevailing SW–WSW flow.
+- **Where does 32767 come from?** (§2.1) Not from Davis — it is introduced by whatever writes
+  `sensors.davis`. Worth knowing which component, since the sentinel could change with the
+  logger while the protocol's `0` = no-data rule cannot.
 - **Does the bearing at the mast represent the bearing at each OTA?** Local topography and
   shadowing by neighbouring units mean it may not. This is the same gap the per-unit servo
   measurement exists to fill, and comparing per-unit σ against the mast bearing is how it
@@ -681,6 +704,12 @@ that characterisation belongs before the campaign rather than after.
   2026-08-27.
 - Pointing-drift figures: computed with astropy for the `ns` site location as recorded in
   the config DB — 30.05301°N, 35.04080°E, 400 m.
+- Davis field semantics (§2.1): *Vantage Pro, Vantage Pro2 and Vantage Vue Serial
+  Communication Reference Manual*, **Rev 2.6.1** (2013-03-29), LOOP packet table, p.22 —
+  Wind Speed at offset 14, Wind Direction at offset 16. Read 2026-08-27 from
+  `davisinstruments.com/support/vantage-pro-pro2-and-vue-communications-reference/`.
+  The from/toward convention is **absent** from that document; do not cite it as the source
+  for that assumption.
 
 **Nothing in §5 has been implemented, and no part of this has been tested against a real
 mount under wind.**
