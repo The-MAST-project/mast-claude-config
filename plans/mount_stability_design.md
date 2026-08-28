@@ -3,9 +3,14 @@
 *Design document for a proposed `MountStabilityMonitor`, owned by `Mount`, plus the
 research that motivates it. Nothing here is implemented yet. Written 2026-08-26.*
 
-**Status: research complete, design agreed, not built.** The measurements in §2 are real
-and reusable regardless of whether the monitor is built. §5 records design decisions
-reached in discussion; §6 lists what must be measured before writing code.
+**Status: campaign implemented (skeleton, uncommitted); monitor still unbuilt.** The
+measurements in §2 are real and reusable regardless. §5 records design decisions reached
+in discussion. §6 lists what had to be measured before writing code — **§6.1 and §6.3 are
+now answered** (2026-08-28), and the answers changed the design in three places. §8
+records what was actually built and where it departs from §5–§6.
+
+Read §8 before §5 if you are picking this up: the monitor described in §5 does not exist,
+but the campaign that feeds it does.
 
 ---
 
@@ -416,6 +421,12 @@ Two tiers, both on existing machinery:
 Sizing for raw: 5 Hz × 2 axes ≈ 24 MB/night/unit as CSV, ~500 MB/night across 20 units —
 fine for a campaign, not as a standing cost.
 
+**Revised by §6.1.** PWI4 actually serves ~44 Hz, not the 5 Hz assumed above, so raw is
+**~200 MB/night/unit**. For the two dedicated units over ten nights that is ~4 GB in
+total, which is still nothing — and §8 records raw rather than summary statistics for a
+reason the original sizing could not have known: at 44 Hz a dwell resolves the
+disturbance *spectrum*, and a σ cannot be un-computed back into one.
+
 Write through `Filer` / `PathMaker` / `MoveGuardian.protect`, the same path spirals and
 acquisitions use, so products land on the share beside the night's other output with no new
 infrastructure and no new failure mode. Keep a stable flat schema and ingesting into a
@@ -464,6 +475,33 @@ per second. That is PWI4's real update rate and the hard ceiling on anything the
 can see. If it is 4 Hz there is no point testing 20 Hz, and the window-length question is
 settled by it. Costs a minute, read-only.
 
+#### Answered, 2026-08-28 on mast02: **~44 Hz**
+
+| measurement | result |
+|---|---|
+| HTTP throughput, persistent `httpx.Client` | 613 Hz, 18381 polls, 0 failures |
+| distinct `axis0/axis1.position_timestamp` | **43.4 Hz**, steady at 42–45 every second |
+| gap between distinct samples | p50 16 ms, p90 32 ms, max 47 ms |
+| duplicate polls at 613 Hz | 93% |
+| `mount.update_count` (PWI4's internal loop) | 69.9 Hz |
+| `mount.update_duration_msec` | p50 0.07, p90 0.10, max 3.98 |
+
+Three consequences:
+
+- **Poll at ~45–50 Hz, not higher.** Above the refresh rate you collect duplicate samples,
+  which is precisely the σ-deflating trap this section was written to avoid.
+- **The dwell-length worry is void** — see the correction at the end of §6.5.
+- **44 Hz buys a spectrum, not just an RMS.** Nyquist ~22 Hz makes structural resonance
+  and the gust rolloff directly observable, which is a different question from "how big is
+  σ" and one the design did not know it could ask. It is why §8 stores raw rows.
+
+The drives deliver ~44 Hz while PWI4's own loop runs at ~70 Hz, so roughly two thirds of
+its iterations carry a new drive sample.
+
+Caveat on provenance: measured with axis0 parked on its soft limit and axis1 idle, so it
+is the drive-to-PWI4 link rate rather than a tracking mount's. It is unlikely to differ,
+but it has not been re-confirmed under tracking.
+
 ### 6.2 Interference — only then
 
 What matters is not the poller's throughput but whether it degrades PWI4's service to
@@ -473,8 +511,19 @@ mimicking `ontimer`, recording its latency distribution — while a load loop ra
 `urllib` (as vendored) and a persistent `httpx.Client` so the connection-setup share of any
 knee is known.
 
-Run on a unit whose mount is tracking but **not doing science** — engineering time. Note
-mast02 is not suitable: port 8220 there serves an HTML page, so PWI4 is not running.
+Run on a unit whose mount is tracking but **not doing science** — engineering time.
+
+~~Note mast02 is not suitable: port 8220 there serves an HTML page, so PWI4 is not
+running.~~ **Wrong, and worth keeping as a cautionary note.** PWI4 4.1.6 runs on mast02
+with the mount connected, and §6.1 was measured there. The HTML page was the **Weizmann
+site proxy** answering 403: on these Windows machines `urllib.getproxies()` reads the
+WinINET *registry* settings, so a client that trusts the environment routes even
+`127.0.0.1:8220` through the proxy. It appears as no proxy variables in the environment,
+and `curl` here does not do it — only Python HTTP clients that honour `trust_env`.
+
+`common/api.py` already passes `trust_env=False` for exactly this reason, so production
+code was never affected; only ad-hoc probes are. **Any tool written against PWI4 must set
+`trust_env=False`** or it will conclude the mount software is absent.
 
 ### 6.3 The offline characterisation
 
@@ -482,6 +531,38 @@ High-rate direct-drive telemetry via PWTools gives the true disturbance spectrum
 its current-noise statistics, the measurement noise floor — without which an elevated σ
 cannot be attributed to wind rather than to the current sense. **This calibrates the online
 detector**, and a windy night that cannot be observed on is exactly when to run it.
+
+#### Largely answered online, 2026-08-28 — the PWTools detour is now optional
+
+Both justifications above turned out to be obtainable from PWI4 itself. A 30 s trace at
+40 Hz on mast02, mount stationary:
+
+| | axis0 (RA/az) | axis1 (Dec/alt) |
+|---|---|---|
+| position spread over 30 s | 0.081″ | 0.137″ |
+| σ(`servo_error_arcsec`) | **0.0039″** | **0.0167″** |
+| σ(`measured_current_amps`) | **0.0046 A** | **0.0055 A** |
+| mean current | −0.007 A | −0.738 A |
+
+**The servo error is pure encoder quantisation.** On both axes `servo_error` spans exactly
+±½ of the position peak-to-peak (±0.0405″, ±0.0686″) and the two spreads agree to the last
+digit — ±1 encoder count of dither, no mechanics in the trace at all. Which is what makes
+it the noise floor:
+
+- σ(servo_error) sits **25–170× below** the 0.4–0.7″ RMS guiding recorded in §6.5. Servo
+  error has ample dynamic range as a stability metric.
+- σ(current) ~0.005 A is the floor for the primary signal: **wind-driven σ(current) above
+  ~0.006 A is real.**
+- A rolling σ(servo_error) below ~0.04″ is meaningless — under one encoder count.
+
+Two caveats. It is measured at **zero velocity**, so it excludes the torque ripple and
+cogging a tracking axis adds — treat it as a *lower bound* on the floor. And whether
+mast02's axes were mechanically locked at the time is unresolved; axis1 carrying 0.74 A of
+holding current suggests a motor bearing the gravity load rather than a clamp taking it,
+but the telemetry cannot separate the two without commanding motion.
+
+PWTools remains the only route to a true disturbance *spectrum* under load and to the
+drive-side current-noise statistics. It is no longer on the critical path.
 
 ### 6.4 Open questions
 
@@ -635,6 +716,13 @@ Stratifying those 40 by wind speed leaves ~13 per cell per bin, which is thin �
 for taking **every** cloudy and moonlit night for the servo-only tier rather than waiting
 only for windy ones.
 
+**Superseded — the pilot must be a SUBSET of the full mesh.** As specified below it shares
+exactly one altitude (65) and two azimuths (0, 180) with the full mesh, so every pilot
+night would be excluded from the final dataset or, worse, silently pooled across two mesh
+definitions — the same failure mode as `MIN_CONFIDENCE` and `max_best_hfd_px`, wearing a
+third hat. §8 uses **alt {15, 65} × az every 72° = 10 cells**, all of which are full-mesh
+cells, so pilot nights contribute real data.
+
 **Pilot first, 2–3 nights: alt {20, 40, 65} × az every 45° = 24 cells.** Its purpose is not
 the baseline. It answers: does σ respond to pointing at all, how large is the effect, does
 slew exclusion work, does the rig survive a night unattended, and does PHD2 tolerate the
@@ -681,6 +769,10 @@ must fall accordingly.** Measure the poll rate before fixing the mesh size — t
 timescale itself is best measured by the offline PWTools run (§6.3), which is another reason
 that characterisation belongs before the campaign rather than after.
 
+**Resolved: it is 44 Hz, so this worry is void.** Sampling is nowhere near the constraint;
+gust autocorrelation is, exactly as the good case above predicted. The 40-cell mesh at
+60 + 60 s dwells stands as designed, and §8 implements it unchanged.
+
 ---
 
 ## 7. Provenance
@@ -711,5 +803,321 @@ that characterisation belongs before the campaign rather than after.
   The from/toward convention is **absent** from that document; do not cite it as the source
   for that assumption.
 
-**Nothing in §5 has been implemented, and no part of this has been tested against a real
-mount under wind.**
+- §6.1 poll rate and §6.3 noise floor: measured on **mast02** 2026-08-28, PWI4 4.1.6,
+  mount connected and stationary with axis0 parked on its `max_mech_position_degs` soft
+  limit. Persistent `httpx.Client(trust_env=False)` against `127.0.0.1:8220/status`.
+- Per-cell declinations (§8): `sin δ = sin a · sin φ + cos a · cos φ · cos A` at
+  φ = 30.05301°, the site latitude in the config DB.
+
+**Nothing in §5 has been implemented.** The MONITOR does not exist. The campaign of §6.5
+does — see §8 — but no part of it has been run against a real mount under wind.
+
+---
+
+## 8. What was built (2026-08-28)
+
+Branch `mount-stability-campaign` in both `MAST_common` and `MAST_unit`, **uncommitted**.
+A skeleton: the structure and all the non-hardware logic are real and exercised, the
+hardware sequencing is wired to existing APIs but has never driven a mount.
+
+### 8.1 Files
+
+| repo | file | what |
+|---|---|---|
+| `common` | `activities.py` | `UnitActivities.StabilityCampaigning`, appended at the end of the enum |
+| `common` | `paths.py` | `PathMaker.make_stability_folder()` |
+| `unit` | `src/stability_campaign.py` | new — mesh, slot clock, descriptor, sampler, session |
+| `unit` | `src/guiding.py` | `Guider.wait_for_settle()`, `Guider.calibration_state()` |
+| `unit` | `src/unit.py` | `self.stability`, three endpoints |
+
+### 8.2 Endpoints — on the UNIT router, not the mount's
+
+`start_stability_campaign(pilot: bool)`, `stop_stability_campaign`,
+`stability_campaign_status`.
+
+§5.1 puts the *monitor* on `Mount` and that still holds. The *campaign* is a different
+animal: its dwell drives the mount, the imager and PHD2, and `Mount` has no business
+reaching into the guider. `SpiralSearch` is Unit-owned for the same reason, and supplied
+the session/watchdog shape reused here.
+
+`status` is not a nicety — the campaign runs unattended for hours, and start/stop alone
+would leave no way to see what it is doing. It reports the current visit and cell, phase,
+visits attempted/completed/skipped, cells that yielded no guide star, and per-cell
+coverage.
+
+Starting is **idempotent** (a retrying client must not spawn a second walker on one
+mount) and **refuses while the unit is acquiring, guiding, focusing or solving** — the
+mesh owns the mount for the night.
+
+### 8.3 The mesh — and the cell that had to move
+
+Full: **alt {15, 30, 45, 65} × az every 36°, offset by 18° = 40 cells**, `MESH_VERSION`
+stamped into every product. Pilot: **alt {15, 65} × az every 72° = 10 cells**, a strict
+subset (verified).
+
+The 18° offset is not cosmetic. A cell's declination has **no time term** —
+`sin δ = sin a · sin φ + cos a · cos φ · cos A` — so each cell guides at the same
+declination on every visit, forever. Along the due-north column that reduces to
+`δ = 90° − |alt − φ|`, and with φ = 30.053° the mesh's `alt 30` row landed **0.05° from
+the celestial pole**:
+
+| | before offset | after |
+|---|---|---|
+| worst cell | alt 30, az 0 → **δ 89.9°**, RA rate 1081× | alt 30, az 18 → δ 74.4°, 3.7× |
+| δ range | −44.9° … 89.9° | −41.7° … 74.4° |
+| cells with \|δ\| > 80° | 1, unguidable | **0** |
+
+PHD2 scales the RA guide rate by 1/cos δ, so that cell could never be guided — by
+geometry, not by calibration. The cell is mechanically ordinary, so unguided dwells were
+fine; what was lost was the **guided-minus-unguided difference**, the headline result,
+across the whole northern column and missing non-randomly. The offset costs nothing: the
+azimuth origin is arbitrary when the covariate is `|az − wind bearing|`.
+
+Two cells remain awkward — `alt 30, az 18` and `az 342` at δ 74.4°, RA rate 3.7×. Expect
+them to be the flakiest for guiding. That is now a known hole rather than a surprise.
+
+**The fixed-δ property is also good news.** Any declination-dependent guiding systematic
+is a constant per-cell offset, so it cancels in the "excess over that unit's own per-cell
+calm floor" comparison §8.7 relies on — provided calibration does not *change* mid-campaign,
+which is what §8.6 exists to detect.
+
+### 8.4 Lockstep — the reason for two units, and it does not happen by itself
+
+The cell is a function of a **campaign-wide slot clock**, not of a stored position:
+
+```
+visit      = floor((now - epoch) / SLOT_SECONDS)       SLOT_SECONDS = 210
+cell_index = (visit * 7) mod 40
+```
+
+Both units compute the same cell at the same moment, so **every cell yields a
+simultaneous pair** — one instant, one bearing, one speed, two OTAs, with the difference
+attributable to shadowing and topography rather than modelled away afterwards. §6.5 asks
+for "the identical mesh on both **under identical wind**"; two units each walking from
+their own checkpoint satisfy the first half and not the second, drifting apart within an
+hour into unit A at 20:00 against unit B at 23:00.
+
+The epoch lives at `<share>/MAST/Stability/<night>/campaign.json`, **above** the
+per-machine product roots, because it is the one genuinely cross-unit piece of state. The
+first unit to start writes it; the second adopts it. Share unreachable → the unit runs with
+its own epoch and records `standalone: true`, so the analysis knows that run cannot be
+paired instead of having to guess. A mesh-version mismatch between the two is refused
+outright.
+
+**Costs ~40 visits/cell rather than ~80 pooled**, and that is the right trade: pooled
+visits across two different mounts are confounded by mount identity anyway (§8.7).
+
+**Stride 7 is coprime with both 40 and 10**, so one pass covers every cell exactly once and
+each cell lands on a different hour on successive passes (verified). This preserves §6.5's
+rotation requirement, which a plain resume-where-you-stopped walk would have destroyed: at
+~4 passes over 40 cells a night, such a walk lands back on cell 0 every evening and every
+cell keeps its time-of-night slot forever.
+
+**Resume is the same mechanism** — a restarted unit computes the current slot. There is no
+checkpoint file to desync from the products.
+
+### 8.5 Products
+
+`PathMaker.make_stability_folder()` → `<ram>/<observing-night>/Stability/<NNNN>`, which the
+mover lands at `<share>/<hostname>/<observing-night>/Stability/<NNNN>`.
+
+Three corrections to the obvious spelling of that path, all load-bearing:
+
+- **No hostname join.** `Filer().shared.root` is *already* `Z:/MAST/<hostname>/` on
+  Windows; joining `gethostname()` yields `Z:/MAST/mast02/mast02/…`.
+- **Observing night, not calendar date.** A campaign runs dusk to dawn and would otherwise
+  split its own products at 02:00 local, mid-mesh, under two names that give no hint they
+  belong together.
+- **RAM disk first, then `move_ram_to_shared` under `MoveGuardian`** — the pattern every
+  other product maker uses. A 44 Hz writer is exactly the case it exists for; writing
+  straight to a network share would largely defeat the guardian's purpose.
+
+`<NNNN>` comes from the existing `PathMaker.make_seq()`. One folder per **cell visit**
+(`visit=NNNNN,cell=NN,alt=..,az=..`) holding `unguided.csv`, `guided.csv`, `meta.json` —
+per-cell rather than per-night so a crash costs one cell, and so coverage is derivable by
+listing.
+
+**Coverage is derived, never stored.** `coverage_from_products()` counts completed visits
+per cell from the products themselves. A separate counter file is one more thing that can
+disagree with the evidence.
+
+Rows carry both PWI4's `position_timestamp` and a host UTC stamp, so the offline join
+against `sensors.davis` can be *checked* rather than assumed — a few minutes of NTP drift
+would misattribute wind to the wrong cell and nothing downstream would reveal it.
+
+### 8.6 Guiding
+
+**Settle, not a fixed wait.** `Guider.wait_for_settle()` polls PHD2's real settle protocol
+(`check_settling()` → `SettleBegin`/`Settling`/`SettleDone`). `guide()` primes the settle
+state before issuing its RPC, so there is no start-up race, and nothing else in the tree
+calls `check_settling()` — which matters, because it consumes the done-transition when it
+reports it.
+
+It returns *what happened*, not a bool: **time-to-settle is itself a measurement** of how
+hard the star was to hold at that pointing, a covariate of the same kind as SNR and HFD.
+Verified across settle / PHD2-gave-up / no-SettleDone / stopped / not-settling / no-settle-
+protocol.
+
+**The wait is bounded by the slot**, not just by a constant:
+`min(45 s, seconds_left_in_slot − 60 s guided dwell)`. Past ~155 s into a slot the budget
+goes negative and the cell **forfeits its guided half but keeps the unguided data**, rather
+than overrunning and costing the pair its next cell too.
+
+**A failed star never aborts the dwell.** Low-altitude cells fail guiding most often and
+matter most (§6.5 risk #2); a design that drops them keeps only the easy half of the mesh.
+
+**Calibration is recorded twice** — in full at run start, and compactly at every visit
+*after* the guide attempt. Camera rotation invalidates calibration, and a recalibration
+part-way through puts a step in the guided residuals that reads exactly like a change in
+wind or exposure; with two units being compared against each other, "did either recalibrate,
+and when" has to be answerable from the products. A start-of-run snapshot alone cannot show
+it. **Operational decision: a PHD2 calibration run on each unit before the campaign starts.**
+
+Note the slot clock adds a wrinkle to §6.5 risk #1: a mid-mesh recalibration takes minutes,
+longer than a 210 s slot, so it does not merely cost time — the unit misses slots and the
+pair loses those cells. It self-heals (the walker rejoins at the current slot) but the cells
+are gone. Pin "auto restore calibration".
+
+### 8.7 Analysis constraints this design bakes in
+
+- **Compare excess over each unit's own per-cell calm floor, not raw σ.** With n = 2 units
+  you cannot separate "A is more exposed" from "A's mount is in worse shape" — the mounts
+  cannot be swapped between locations. This makes calm nights a *requirement*, not a
+  consolation prize; §2.4 says 63% of nights are calm at 21:00, so they are abundant.
+- **Wind joins offline** against `sensors.davis` on timestamp. No live wind path was added
+  to the unit: `safety_get_sensor` gives speed only, and direction is needed. Davis is
+  quantised to 60 s and 1.6 km/h, so it labels the *regime*; within-dwell gustiness is only
+  measurable from the mount's own telemetry.
+- **Raw rows, not summary σ** — see the §5.5 revision.
+
+### 8.8 Not done
+
+- **No tests.** The mesh, rotation, lockstep, settle and slot-budget logic were exercised
+  ad hoc and all pass; none of it is in the test suite.
+- **The wrap check is a guard, not a predictor.** It refuses a cell when axis0 is already
+  within 10° of a limit, but a cell's exact mech position is only known after the RA/Dec
+  transform. §6.5 risk #4 is live: mast02 was found parked on `max_mech_position_degs`
+  with a target 378° away on 2026-08-28.
+- **PHD2 start/stop cycling is untested at campaign rate.** ~160 cycles/night is far
+  outside normal use and `phd2.py` already carries a workaround for a `GuideStep` arriving
+  after stop. Soak-test it for a night before trusting a campaign to it. This was never
+  about the settle wait; it is about the cycling.
+- **Unresolved and physical: is `wind_direction` "from" or "toward"?** (§6.4) Everything in
+  §2.5 and the broadside binning in §5.4 inverts if it is the other way, and nothing in the
+  data would ever reveal it. A person is attending the campaign — this is five minutes with
+  a compass on a windy evening and it should happen on night one, before the mesh data
+  accumulates under an unverified assumption.
+- **Verify NTP on both units** before night one, and record each unit's clock offset in the
+  run metadata (§8.5).
+- If the camera really was rotated, anything else derived from camera orientation — optical
+  centre, fibre position used by acquisition — is equally stale. Outside this campaign's
+  scope, worth a glance while calibrating.
+
+---
+
+## 9. Operator procedure
+
+For the person on site. Everything here is driven from each unit's **OpenAPI page** (the
+service's `/docs`) — open one browser tab per unit and keep both up all night. The three
+endpoints are under the **"Mount stability campaign"** tag:
+`start_stability_campaign`, `stop_stability_campaign`, `stability_campaign_status`.
+
+**The campaign takes both units for the whole night.** They cannot run plans or
+acquisitions while it walks the mesh, and it will refuse to start if either is busy.
+
+### 9.1 Once, before the first night
+
+| # | Check | Why it matters |
+|---|---|---|
+| 1 | **Run a PHD2 calibration on each unit.** | The cameras may have been rotated; a stale calibration silently inflates the guided residuals, which is the half of the measurement guiding exists to provide. |
+| 2 | **Pin PHD2's "auto restore calibration".** | Stops PHD2 recalibrating mid-mesh. A recalibration takes minutes — longer than one 210 s slot — so it costs cells, not just time. |
+| 3 | **Confirm the clocks.** Both units NTP-synced and agreeing with each other. | The wind data is joined to the telemetry by timestamp, offline. A few minutes of drift attributes a cell's data to the wrong wind and **nothing downstream reveals it.** |
+| 4 | **Check `Z:` is mapped on both units.** | Without the share the units cannot share an epoch and will not be in lockstep — see `standalone` in 9.3. |
+| 5 | **On a windy evening, settle the wind-vane question.** Watch which way the vane points, or take a handheld compass bearing against the prevailing SW–WSW flow, and write down what you see. | The Davis manual never states whether `wind_direction` is the direction the wind comes *from* or goes *toward*. If it is "toward", every bearing in §2.5 flips 180° and every broadside result inverts — and no amount of data would show the mistake. Five minutes, and it invalidates the whole analysis if skipped. |
+
+### 9.2 Every night, before starting
+
+1. **Unwrap axis0 if it is near a limit.** Check `min/max_mech_position_degs` against
+   `position_degs` on each unit. The mesh sweeps azimuth all night and will find a limit
+   that is already close; mast02 was found parked on its limit on 2026-08-28. Cells are
+   skipped rather than forced, so a wrapped mount quietly does nothing all night.
+2. **Mount ready**: unparked, tracking, covers open, focus done.
+3. **Safety system reporting normally**, and check the forecast — rain ends the night.
+4. **Decide pilot or full**, and use the **same choice on both units**. The second unit
+   will be *refused* if its mesh does not match the first's. That refusal is deliberate,
+   not a bug.
+   - First 2–3 nights: **pilot** (10 cells).
+   - After that: **full** (40 cells).
+5. **Prefer a windy night.** §2.4: if it is at or above ~15 km/h at 21:00, this is an
+   informative night — run the mesh. If it is calm, run it anyway when you can; the calm
+   floor per cell is a requirement of the analysis, not filler.
+
+### 9.3 Starting — and the one check that matters
+
+Call `start_stability_campaign` on **both units, within a few minutes of each other**.
+Order does not matter: whichever starts first creates the night's shared epoch, the second
+adopts it.
+
+Then call `stability_campaign_status` on both and confirm:
+
+| Field | Expect | If not |
+|---|---|---|
+| `active` | `true` | Read `last_error`. |
+| `standalone` | **`false` on both** | **Stop, fix the share, restart.** `true` means that unit invented its own epoch and is *not* paired with the other — the night's main result is lost even though data still accumulates. |
+| `epoch_utc` | **identical on both units** | They are not in the same campaign. Stop both and restart. |
+| `mesh_version` | identical on both | As above. |
+| `cell` | **the same cell on both**, when read at the same moment | If they differ, they are not in lockstep. |
+
+That last row is the whole point of running two units: the same cell, at the same instant,
+on two OTAs. If it does not hold, the night measures half of what it should.
+
+### 9.4 Through the night
+
+Refresh `stability_campaign_status` occasionally. Normal looks like:
+
+- `visits_completed` climbing by about **17 per hour** (one cell per 210 s slot).
+- `phase` cycling `unguided` → `acquire` → `guided` → `idle`.
+- `guide_failures` accumulating **mostly at low altitude**. This is expected and is not a
+  fault — those cells still produce good unguided data.
+- `coverage` filling in broadly evenly across cell indices.
+
+Worth acting on:
+
+| Symptom | Likely cause | Do |
+|---|---|---|
+| `cells_skipped` climbing steadily | axis0 near its wrap limit | Stop, unwrap, restart. |
+| `guide_failures` high **at all altitudes** | calibration, focus, or cloud | Check PHD2; consider stopping and recalibrating. |
+| `visits_completed` not advancing | walker stuck or mount fault | Read `last_error`; stop and restart. |
+| The two units drift onto different cells | one lost slots to a long recalibration | It self-corrects at the next slot. If it persists, stop both and restart. |
+| `standalone` became relevant (share dropped) | network/share | Data still lands locally; the pairing for that run is lost. |
+
+Also note in the log book anything the software cannot see: cloud, dome/enclosure state,
+wind you can feel, anyone touching the units. Those notes are what rescue an anomalous
+night from being discarded.
+
+### 9.5 Stopping
+
+Call `stop_stability_campaign` on both units.
+
+- It finishes the sample it is inside, then stops — expect up to about a minute.
+- A cell counts only once **both** its dwells are written, so stopping mid-dwell discards
+  that visit rather than contributing a short one. That is intended.
+- **The mount parks on the way out.** Do not assume it is still tracking afterwards.
+- Confirm `active: false` on both before leaving.
+
+Stop for rain, an unsafe reading from the safety system, or a mount fault. Wind is *not* a
+reason to stop — a windy night is the one you came for.
+
+If a unit will not stop, the walker also gives up on its own after 14 hours, and it parks
+by the same path. Restarting the unit's service is the blunt fallback; the products already
+written are unaffected, since each cell is complete on disk before the next begins.
+
+### 9.6 Where the data goes
+
+`Z:\MAST\<hostname>\<observing-night>\Stability\<NNNN>\` — one folder per run, one
+subfolder per cell visit, each holding `unguided.csv`, `guided.csv` and `meta.json`, with
+`campaign.json` at the run root.
+
+The `<observing-night>` label turns at **12:00 UTC**, so a whole night stays in one folder
+and carries the same date as that night's logs. Expect roughly **200 MB per unit per
+night**. Nothing needs copying by hand — the files move to the share as they are written.
