@@ -72,9 +72,10 @@ acquire (spec phase, mastrometry, corrections on)
     |
     +-- for each spiral step:
     |       wait for the mount to settle
-    |       imager exposure  ]  in parallel
-    |       ThorCam exposure ]
-    |       flux = background-subtracted frame sum, normalised (§5.2)
+    |       repeat number_of_frames times:
+    |           imager exposure  ]  in parallel
+    |           ThorCam exposure ]
+    |       flux = MEDIAN of this step's ThorCam sums (§5.6)
     |       stop when a ring adds no improvement, or a cap is hit (§4)
     |
     +-- pick the argmax index
@@ -113,8 +114,8 @@ Three things follow, and the third is a cost rather than a benefit:
   them has to be kept at full detector sampling.
 
 The frame at the argmax is also whatever was taken there — a cloud, a cosmic ray or a
-tracking glitch at that index cannot be retaken. The per-frame covariates (field-star count,
-HFD, normalised flux) are what make such a frame identifiable after the fact.
+tracking glitch at that index cannot be retaken. Since every frame is kept (§8.2), such a
+frame is identifiable afterwards, but only offline.
 
 **The mount no longer ends at the best-coupling position.** It stops wherever the search
 stopped, up to a ring away from the argmax. §7 says where to leave it.
@@ -189,34 +190,45 @@ carries both scale and rotation — so it does not depend on `pixel_scale_at_bin
 so its WCS lives in the cropped-and-downsampled frame. Go back through `solvers/pixel_grid`
 rather than hand-rolling the transform.
 
-### 5.2 Normalise the flux by field stars
+### 5.2 Transparency drift, and why it is not corrected here
 
 The ThorCam sees **only** the target's light through the fibre — everything around it is
-black. That makes the flux estimator trivial (background-subtracted frame sum) and it means
-the ThorCam carries **no internal transparency reference at all**.
+black. The flux estimator is therefore trivial (background-subtracted frame sum), and the
+ThorCam carries **no internal transparency reference at all**.
 
-Over a 20–40 minute spiral, transparency drifts. Without a campaign to average over, this is
-not noise but **bias**: a monotonic decline pulls the argmax systematically earlier along
-the path, and on a broad peak that is a cell or two — comparable to the entire precision
-budget.
+Over a 20–40 minute spiral, transparency drifts, and a monotonic decline pulls the argmax
+earlier along the path. Near the peak — where the curve is flattest, by definition — a
+percent or two is a cell or two.
 
-The imager frame taken in parallel at every step is the reference. The target is occulted,
-but the **field stars are not**, and they do not respond to the spiral — which is exactly
-what makes them a clean transparency monitor. Ensemble aperture photometry over the field,
-inside the same usable window as the correlation (§5.3), divides the drift out and turns the
-measurement into a coupling efficiency.
+**No correction is applied.** An earlier revision of this document proposed dividing the
+fibre flux by ensemble photometry of the field stars in the parallel imager frame. That is
+dropped, for three reasons:
 
-The same source-detection pass yields the **field-star count**, which is the one *measured*
-predictor of correlation reliability: of 18 real MAST pairs, those with fewer than ~30
-matchable stars failed 5 times in 6, while those with 45 or more failed once in 13. Record
-it, and warn on a sparse field.
+- **It is a correction for a problem not yet shown to exist.** §12 runs repeatability first;
+  if transparency drift is biasing the argmax, it shows up there as excess scatter. Building
+  the correction before that measurement is the same mistake §5.3's observer-before-gate
+  discipline exists to prevent.
+- **It can be applied offline, from data already kept.** Every imager frame is saved at full
+  resolution (§8.2), so the photometry can be done afterwards, checked against the frame
+  timestamps, and applied retrospectively. Nothing is lost by deferring; nothing is gained by
+  building it in.
+- **Doing it correctly is not simple.** The folding-mirror shadow is fixed in the *detector*
+  frame while the field slides across it — ~1.9 px per 0.5″ step, ~38 px over the full span —
+  and the shadow has graded edges. A field star near one would show a flux change correlated
+  with spiral position: exactly the artefact the correction is meant to remove, injected by
+  the correction itself. Shadow-aware star selection belongs in offline analysis where the
+  result can be inspected, not in the run.
+
+What **is** kept is not photometry: a source count on the **reference frame only**. It is the
+one *measured* predictor of correlation reliability — of 18 real MAST pairs, those with fewer
+than ~30 matchable stars failed 5 times in 6, while those with 45 or more failed once in 13.
+One `detect_sources` call per run, and it says whether to trust `dx, dy` at all.
 
 ### 5.3 The usable window, and the mirror shadow
 
 `usable_fraction` (default 0.66) bounds a region around the configured fibre position,
-keeping the coma-dominated edges of the frame out of the analysis. It governs **both** the
-correlation window and the field-star photometry region — same reason for both, so one
-parameter rather than two.
+keeping the coma-dominated edges of the frame out of the analysis — the correlation window,
+and the region the reference frame's source count is taken over.
 
 **Do not mask the folding-mirror shadow.** `imaging/frame_shift.py` is explicit that this
 was considered and rejected: `_bg_subtract`'s 64-px background model already absorbs the
@@ -254,7 +266,7 @@ The remedy is narrower than it looks, and worth knowing before the first bright 
 `flux_gain` defaults to 0, which is already the floor, and `flux_black_level` is a pedestal
 rather than a scaling, so neither helps. The ThorCam exposure follows `seconds` (§6), so the
 only lever left is **shortening `seconds` — which shortens the imager exposure with it**,
-costing field-star SNR for the correlation and the normalisation.
+costing the field-star signal the correlation depends on.
 
 If a target turns out to saturate at the shortest `seconds` that still gives usable imager
 frames, the options are a fainter target or decoupling the two exposures. The coupling is
@@ -283,12 +295,105 @@ measurement whenever the argmax lands at index 0 — two frames at the same poin
 measured shift is a direct read of the noise floor that §12 otherwise has to establish by
 repetition.
 
+### 5.6 Several exposures per step, reduced by the median
+
+Each step takes `number_of_frames` imager+ThorCam pairs at one pointing. The step's flux is
+the **median** of the ThorCam sums, and the imager frame the correlation would use is the one
+paired with the sample **nearest that median**.
+
+Median rather than mean because the arg-max is decided where the coupling curve is flattest
+-- that is what a maximum is -- and that is exactly where one outlier has most leverage over
+which cell wins. A cosmic ray, a gust or a tracking glitch moves a mean and leaves a median
+alone.
+
+Pairing the correlation frame to the median sample keeps the two halves consistent: the shift
+is measured from the same instant as the flux that chose the step, rather than from an
+arbitrary member of the burst. The mount does not move within a step, so the frames differ
+only by seeing, noise and whatever the tracking drifted -- which is why choosing among them by
+flux is defensible at all: it selects a typical moment rather than an excursion.
+
+**Prefer an odd count.** With an odd number the median IS one of the samples, so the chosen
+pair is exact. With an even number the median is interpolated, belongs to no frame, and the
+choice falls between the two middle ones -- resolved deterministically, but standing for
+nothing physical.
+
+The reference frame is exposed the same way (§3), because it is the other half of the same
+correlation, and treating the two sides differently would put a systematic between them that
+no later analysis could separate from the answer.
+
+**It costs time and storage linearly.** Settle is paid once per step; the exposures are serial
+within it:
+
+| | N=1 | N=3 | N=5 |
+|---|---|---|---|
+| per step | ~13 s | ~29 s | ~45 s |
+| 81 steps (ring 4) | 18 min | 39 min | 61 min |
+| 169 steps (ring 6) | 37 min | **82 min** | 127 min |
+| stored, ring 6 | 15.8 GB | **47.6 GB** | 79 GB |
+
+The storage need NOT scale, even though it currently does. Unlike the no-backtrack constraint
+of §3.1, the representative frame is identified at the end of its **own step**, so only it has
+to survive the run. Keeping all N is a debugging choice, and dropping the rest is a one-line
+change if the volume bites.
+
 ---
 
 ## 6. The endpoint
 
-`acquire_and_find_max_flux`, on the unit router. A plain method — no closure is needed,
-because nothing in the signature has a configuration-derived default.
+`acquire_and_find_max_flux`, on the unit router, declared through the endpoint contract that
+landed with MAST_unit#77 (`docs/adding-an-endpoint.md`):
+
+```python
+@endpoint(tier=Tier.OPERATION, completion=UnitActivities.FluxMetering)
+def endpoint_acquire_and_find_max_flux(self, ...): ...
+```
+
+- **`Tier.OPERATION`** — an operator and diagnostic verb, not orchestration `MAST_control`
+  depends on. The tier *is* the Swagger group, so no `tags=` (it would be ignored with a
+  warning, and a check keeps the tree free of them).
+- **`completion=UnitActivities.FluxMetering`** — the run outlives its response, so the caller
+  is answered at once and watches that flag clear. `test_completion_flags.py` verifies the
+  handler really raises the flag it advertises, and `test_activity_flag_balance.py` verifies
+  it is always cleared: a flag that starts and never ends hangs a waiter forever.
+- **No `factory=True`.** It exists for defaults that need loaded configuration — which is why
+  `spiral_new_path` uses it — and dropping `fiber_x`/`fiber_y` from the signature removed our
+  only such default.
+- Registered with the helper, `PUT` because it changes state:
+  `add_api_route(router, "/unit/acquire_and_find_max_flux", endpoint=..., methods=["PUT"])`.
+  Never `router.add_api_route`, which would bypass the declaration refusal, the envelope and
+  the tier tag at once.
+
+Four consequences for the body, each enforced by a check:
+
+- **Return the bare value.** The envelope is applied once at registration, so the handler
+  never builds `CanonicalResponse(value=...)`; it refuses with `CanonicalResponse(errors=[…])`
+  and answers `CanonicalResponse_Ok` where "ok" is genuinely the answer. It must never
+  bare-`return`, return `None`, or let an exception escape.
+- **No `assert` as a runtime guard** — stripped under `python -O`, and the envelope renders
+  `AssertionError` as an anonymous error. Guards are `require_*` helpers returning a refusal.
+- **Preflight before the expensive part**, and *a thread dispatch counts as expensive*. Every
+  parameter check, component precondition and configuration check happens before the run
+  starts, because a route that dispatches and answers `Ok` has already spent the request.
+- **The thread target is `do_acquire_and_find_max_flux`** — dispatcher `<operation>`, target
+  `do_<operation>`, enforced by `test_dispatch_naming.py`.
+
+The status endpoint is a separate `Tier.OPERATION` route with `Completion.IMMEDIATE`, `GET`.
+It returns a **typed `FluxMeteringStatus`**, which is also nested in the unit's own status as
+`FullUnitStatus.flux_metering` (None until a run has happened). That is why it must be
+returned bare: `FullUnitStatus` types its fields as the status models, and the contract's one
+load-bearing exception is that a status returns its model rather than an envelope, since an
+envelope nested in the payload breaks every consumer silently.
+
+Carrying the step list there costs about **71 KB** at the default `max_rings` of 6, on a
+status that is polled and pushed over the websocket. If that proves too heavy, the steps can
+stay in this route and `result.json` and be dropped from the nested copy — one line in
+`Unit.status()`.
+
+Two parameters beyond §5.6's `number_of_frames`: `gain` (the imager's, named as the acquirer
+names it minus the `_absolute` suffix) and the usual target and spiral arguments.
+
+Run `python -m pytest tests/contract -q` — about two seconds, no hardware — before believing
+any of this is wired correctly.
 
 ```python
 def endpoint_acquire_and_find_max_flux(
@@ -319,15 +424,18 @@ def endpoint_acquire_and_find_max_flux(
 Twelve parameters. **The ThorCam exposure is not one of them**: it is `seconds`, converted
 to microseconds.
 
-That is worth doing deliberately rather than as a convenience. §5.2 divides the fibre flux
-by the field-star flux measured on the imager frame taken at the same moment, and that ratio
-is only clean if the two frames integrate over the **same window**. A millisecond ThorCam
-exposure against a 5 s imager exposure would sample one slice of scintillation against a 5 s
-average, and the mismatch would land in the ratio as noise. Equal durations remove it.
+An earlier revision justified this by the field-star ratio needing matched integration
+windows. That reason is gone with §5.2, but the tie is still the right default for a
+different and simpler one: **a long integration averages over scintillation.** A
+millisecond exposure samples one instant of a twinkling star, so the flux curve would carry
+scintillation noise on top of the coupling signal it is meant to resolve — and the argmax is
+decided exactly where that curve is flattest. Seconds of integration smooths it. One fewer
+parameter is the secondary benefit, not the reason.
 
-For the same reason the two exposures should be *started* together and each frame should
-record its own start and end timestamps, so the overlap is verifiable afterwards rather than
-assumed — the imager path goes through PHD2 and may not begin the instant it is asked.
+The two exposures should still be *started* together, and each frame should record its own
+start and end timestamps: they are what make the offline transparency analysis of §5.2
+possible later, and the imager path goes through PHD2 and may not begin the instant it is
+asked.
 
 **Check the exposure against the camera's range at open.** The SDK reports a valid exposure
 interval; `seconds` is chosen for the imager and nothing guarantees the Zelux accepts it. If
@@ -456,7 +564,7 @@ argmax_saturated           whether the argmax frame was clipped -- if true, dx/d
 saturated_frame_count      how many frames clipped at all
 commanded_offset_px        the argmax cell's commanded offset, cos(dec)-corrected, in pixels
 flux_curve                 per index: cell, raw flux, normalised flux, saturated pixels
-field_star_count, hfd      per frame, from the same detection pass
+field_star_count           sources in the REFERENCE frame; the predictor of correlation reliability
 terminal_state             one of the four in section 7
 axis0/axis1 position_degs  mechanical positions, for a later flexure question
 temperature, timestamps    UTC
