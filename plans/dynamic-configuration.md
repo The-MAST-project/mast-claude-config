@@ -1,5 +1,30 @@
 # Dynamic configuration: a live config store, refreshed on change
 
+## Status
+
+| Phase | State |
+|---|---|
+| 0 — the live store, generation-keyed memoization | **Landed**, `MAST_common` #95 |
+| 1 — watcher, `on_change`, degraded mode, boot cache | **Landed**, `MAST_common` #96 |
+| 2 — consumers: `control`, `gui`, `spec`, `unit` | Not started |
+| 3 — remove the deprecated shims, org-wide grep | Not started |
+
+Nothing in the fleet behaves differently yet: `start_watching()` is opt-in and no service
+calls it, so phase 2 is what turns the mechanism on. What phases 0–1 did change is that
+`set_unit` now sees its own write, and that an unreachable controller raises `ConfigError`
+rather than a bare `ServerSelectionTimeoutError` (MAST_common#82).
+
+Where this document was revised by what implementation turned up, the section says so
+inline rather than being quietly corrected — the reasoning that was wrong is usually more
+useful than the conclusion that replaced it.
+
+One thing found along the way and fixed separately (`MAST_common` #94): the `planners`
+group carries a `canManagePlans` capability that `UserCapabilities` did not list, so
+`GroupConfig(**group)` raised on it and took `Config.get_users()`, `get_user()` and the
+controller's `/config/users` and `/config/user` endpoints down with it. It had been that
+way in production; MAST_gui was unaffected only because it derives that permission from
+Django rather than from this enum.
+
 ## Context
 
 `Config` reads MongoDB once and never again. `self.db` is assigned at
@@ -109,9 +134,20 @@ backoff, and keep re-reading at the poll interval even with no stream. `invalida
   a missed event costs latency, not correctness. Persisting a token would buy nothing — we
   full-reload at startup regardless — and adds a stale-token failure mode.
 - **No `full_document`.** We ignore it anyway, so it is pure wire cost.
-- **Reload per collection**, named by `change["ns"]["coll"]`, with a ~0.25 s burst coalesce. At
-  18 KB total this is not about bytes — it is about giving `on_change` an accurate
+- **Reload per collection**, named by `change["ns"]["coll"]`, one event at a time. At 18 KB
+  total this is not about bytes — it is about giving `on_change` an accurate
   changed-collection set, so a `users` edit does not wake a callback registered for `units`.
+
+  *Revised during implementation.* This originally specified a ~0.25 s burst coalesce in the
+  watcher, collecting further events with another `try_next()` before reloading. That is
+  wrong, and expensively so: `try_next()` blocks for the full idle timeout when no further
+  event is waiting, which is the common case — so the coalescing meant to reduce work delayed
+  **every** change by that timeout. Measured against `rs0`: 10.03 s to propagate a change the
+  server had delivered in 0.02 s. The loop was removed, and nothing was lost — pymongo returns
+  already-buffered events without a round trip, a duplicate reload publishes nothing because
+  `_publish` compares documents rather than counting events, and the callbacks (the part that
+  actually wants coalescing) are merged into one pending change by `_enqueue_change` anyway.
+  **Coalescing belongs on the notification side, not in the watcher.**
 - **Safety poll** every ~300 s while healthy: a stream can be alive and silently behind, and
   that failure is otherwise indistinguishable from "nobody edited anything".
 - **Logging is edge-triggered**: one ERROR entering degraded, one INFO leaving it with the outage
@@ -307,11 +343,14 @@ wrapping (#82); delete both TTL caches and the dead load path; `_section` deep-c
 against a snapshot whose generations never move; DNS TTL cache. Consumers see the same API, fewer
 bugs, faster calls, no new threads.
 
+*Revised during implementation:* `Config._reset_for_tests` moved here from phase 1. Phase 0 had
+no way to build a `Config` without reaching MongoDB, so none of it was testable offline without
+it. It is small and test-only, and it also fixes a standing problem — the singleton's
+`_initialized` guard leaks the first test's `Config` into the whole session.
+
 **Phase 1 — additive mechanism, off by default.** `ConfigSource` + `MongoConfigSource`; snapshot
 publishing; watcher; poll fallback; `degraded` + `ConfigHealth`; local cache; `on_change`;
-`start_watching()`/`stop_watching()`; `Config._reset_for_tests` (which also fixes a standing
-problem — the singleton's `_initialized` guard leaks one test's `Config` into the whole session).
-No thread starts unless a consumer opts in.
+`start_watching()`/`stop_watching()`. No thread starts unless a consumer opts in.
 
 Two deliberate behaviour changes here, both worth their DECISIONS lines:
 
