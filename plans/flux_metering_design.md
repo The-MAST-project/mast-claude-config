@@ -785,5 +785,185 @@ is a second camera.
 - Detector geometry: `common/asi.py` — `ASI_294MM_WIDTH = 8288`, `ASI_294MM_HEIGHT = 5644`.
 - PyPI absence of the Thorlabs SDK: queried 2026-08-29.
 
-**Nothing here has been implemented, and no part of it has been run against a mount, a
-fibre or a camera.**
+~~**Nothing here has been implemented, and no part of it has been run against a mount, a
+fibre or a camera.**~~ **Superseded 2026-09-02.** Sections 1-16 were implemented on the
+`flux-metering` branches (`MAST_unit#205`, `MAST_common#97`) and run four times on mast02
+(`Z:\MAST\mast02\2026-09-01\FluxMetering\0001`-`0004`). The runs were mechanical shakedowns
+with `skip_acquisition: true` in a closed enclosure, so the optics half is still untested:
+run `0004` reports `dx=0.75, dy=0.75` at `confidence: 0.0` with `low_confidence: true`,
+which is the correlation correctly finding nothing in a starless frame. See section 17.
+
+---
+
+## 17. `spiral_correlate_steps` — correlating any two steps of a finished run
+
+### 17.1 What it is, and why the run's own result is not enough
+
+A run correlates exactly one pair: the reference frame against the arg-max frame (section
+3.1), once, at the end. There is no way to ask *"what shift is there between step 3 and step
+7?"* without re-running the whole spiral — which cannot be done at all for a run already on
+disk, since the sky has moved.
+
+`spiral_correlate_steps` takes two step numbers from one completed run and reports the
+`dx, dy` between their imager frames, writing the answer beside the run's own products.
+
+**Decided 2026-09-02, and each decision narrows it:**
+
+| | |
+|---|---|
+| Both steps come from **one sequence** | so the run's own parameters are the only ones in play |
+| **No overrides, no experiments** | the original run's parameters are used verbatim |
+| An **aborted or incomplete run is refused** | a `CanonicalResponse` error, not a best-effort answer |
+
+The deliverable is `dx, dy` between two steps. Nothing else.
+
+### 17.2 Parameters, and why there are no dropdowns
+
+Requested: OpenAPI dropdowns for date, sequence and the two step numbers, populated from the
+shared area. **This is not achievable in FastAPI/Swagger, and a half-working version would be
+worse than none.** Recorded here so it is not re-proposed:
+
+1. A dropdown comes from an **`Enum`-typed** parameter, and enum members are fixed when the
+   module is *imported*. Flux metering creates a new sequence every run, so the list is
+   stale from the first run after service start — wrong precisely when it is being used.
+2. Building the enum at import **couples process startup to the share being reachable**.
+   `Filer` deliberately degrades to `local.root` when the share is down; an import-time enum
+   has no such recovery and would bake an empty list in for the process's lifetime.
+3. **Cascading is impossible.** Sequence depends on date; steps depend on sequence. OpenAPI
+   has no dependent-enum concept, so three independent dropdowns would confidently offer
+   combinations that do not exist. That is worse than a text box, because it looks
+   authoritative.
+4. FastAPI caches `app.openapi_schema` after first generation, so per-request regeneration
+   needs cache-busting, and a schema mutated at request time is out of reach of the contract
+   tests' static analysis.
+
+There is no enum-dropdown precedent anywhere in the unit's API today.
+
+**Proposed instead — not yet confirmed, and worth confirming before implementation:** two
+discovery endpoints returning live data, which can carry what a dropdown never could.
+
+```
+GET  .../flux_metering/runs                        -> dates and sequence numbers on the share
+GET  .../flux_metering/runs/{date}/{seq}/steps     -> per step: index, cell, ring,
+                                                      offset_arcsec, flux, imager_frame
+PUT  .../flux_metering/spiral_correlate_steps      -> date, seq, step_a, step_b
+```
+
+Listing steps *with their flux and cell* is the point: nobody wants to pick "step 7" from a
+list of integers — they want to see that step 7 was the arg-max at cell (0,1). Defaulting
+`date` and `seq` to the most recent run makes the common case genuinely "two step numbers",
+which is what was asked for.
+
+### 17.3 The prerequisite: record the values the run actually used
+
+**This is a change to existing code and it must land before, or with, the new endpoint.**
+
+Everything the correlation needs is already persisted — `usable_fraction` in `params`,
+`fiber_x/fiber_y/fiber_source` in `result`, `reference_frame` at the top, and each step's
+`cell`, `ring`, `offset_arcsec` and `imager_frame` in `steps[]` — with two exceptions, and
+both are read from **live state** today:
+
+| value | read from | why that breaks on re-correlation |
+|---|---|---|
+| `pixel_scale_at_bin1` | the live config (`session.py::_commanded_offset_px`) | the config may have changed since; it was `0.0` in the DB under MAST_unit#138, and `5a66745` has since constrained it |
+| dec, for the `cos(dec)` RA factor | `self.unit.mount.status().dec_j2000_degs` (`session.py::_dec_degrees`) | **whatever the mount is pointing at right now** — an hour later, an unrelated part of the sky |
+
+For the original run both are correct by construction. For a re-correlation neither is.
+
+This matters more than it looks, because `commanded_offset_px` is **the** check on whether a
+correlation means anything (section 9.1) — it is what showed run `0004` to be noise:
+`[0.0, 1.91]` commanded against `[0.75, 0.75]` measured. Recomputing it from today's mount
+position yields a plausible number that means nothing, which is the exact failure mode
+section 5's `MIN_CONFIDENCE` history warns about.
+
+**So `_finish` records the pixel scale and the dec it used, in the same document.** Cheap
+now; impossible to reconstruct later.
+
+**Runs already on the share (`0001`-`0004`) do not carry them.** They are not refused — they
+are not aborted, merely older — but their `commanded_offset_px` is reported as `null` with a
+stated reason, following the existing rule of *no check at all beats a check that always
+reads zero*.
+
+### 17.4 Refusal, and what counts as incomplete
+
+A `CanonicalResponse` error, naming which condition failed:
+
+- no `result.json` in the run folder
+- `terminal_state` absent or `aborted` — an aborted run's steps may be inconsistent with its
+  own parameters
+- either step index outside `steps[]`
+- a step carrying no `imager_frame`, or a frame file that is not on the share
+
+Deliberately **not** a fallback to live configuration. That was considered and rejected with
+the "no experiments" decision: a re-correlation is either faithful to the run or it is
+refused.
+
+### 17.5 The correlation itself
+
+Reuse the primitives, as section 10 already argues. `_correlate` in `session.py` is 90% of
+this and merely happens to hardcode reference-vs-arg-max; extract its core to a function
+over two frames plus geometry, and let the session call it too. `measure_shift`,
+`margins_from_fraction`, `max_reliable_shift` and `MIN_CONFIDENCE` are unchanged.
+
+Two generalisations fall out of taking an arbitrary pair:
+
+- **`expect_no_motion` when the two steps share a cell**, generalising the present
+  `best.cell == (0, 0)` test. Otherwise a legitimate null measurement is flagged as
+  fixed-pattern capture.
+- **`commanded_offset_px` is the *difference* between the two steps' commanded offsets**,
+  not one step's. That difference against the measured `dx, dy` is the whole diagnostic
+  value of the endpoint.
+
+Each step already records the single representative `imager_frame` the correlation should
+read (`session.py:375`, section 5.6), so a step number is unambiguous and the multi-frame
+reduction needs no exposing.
+
+### 17.6 The product
+
+`correlate-<step_a>-<step_b>.json`, five digits each to sort with the frames, written
+**beside `result.json` in the same run folder**.
+
+Written **directly to the share, not through `MoveGuardian` and not via the ram disk**
+(contrast section 8.1): the inputs are already share-resident and the run is finished, so
+there is no mover to race and nothing to protect against. Re-running a pair overwrites, and
+the document records its own `created_at` and inputs so a stale copy is recognisable.
+
+Contents: `dx`, `dy`, `confidence`, `at_origin`, `low_confidence`, `magnitude_px`,
+`max_reliable_shift_px`, `beyond_limit`; both steps' `index`, `cell`, `ring`,
+`offset_arcsec` and `imager_frame`; `commanded_offset_px` for the pair; the
+`usable_fraction`, `fiber_x/y`, pixel scale and dec used, each with its source; and the
+run's `date`, `seq` and `hostname`.
+
+### 17.7 Contract placement
+
+`PUT`, because it writes a file — invariant 5, state-changing routes answer PUT.
+`@endpoint(tier=Tier.OPERATION)` with **no `completion=`**: it is synchronous and raises no
+activity flag, so there is nothing for a caller to wait on. Bare return; the envelope is
+applied at registration. Registered with the `add_api_route` helper.
+
+It touches no hardware and reads only the share, so it must **not** be guarded on any
+component being operational — it is expected to be used on a unit that is idle, or the
+morning after.
+
+### 17.8 Verification
+
+- a synthetic run folder in `tests/fakes/`: two frames with a known injected shift, and a
+  `result.json` carrying the geometry — the measured `dx, dy` recovers the injection
+- **`test_a_run_without_recorded_geometry_reports_a_null_commanded_offset`** — the
+  `0001`-`0004` case; asserts `null` and a stated reason, never a number
+- **`test_an_aborted_run_is_refused`** and one test per refusal condition in 17.4, each
+  asserting the error names the condition
+- **`test_two_steps_in_the_same_cell_expect_no_motion`** — pins the generalisation
+- `commanded_offset_px` is the difference of the two offsets, with `cos(dec)` applied to the
+  RA axis only
+- the output file name contains both step numbers and lands beside `result.json`
+
+### 17.9 Open
+
+- **The discovery endpoints of 17.2 need confirming** before implementation.
+- **Reference-vs-step is not covered.** The parameters are two *step* numbers, and the
+  reference frame is not a step. A run correlates reference-vs-arg-max only, so
+  "reference against step 3" remains unavailable. A sentinel step index would cover it if
+  it turns out to be wanted.
+- **Cross-run correlation** — two full `(date, seq, step)` triples — is explicitly out of
+  scope per the same-sequence decision, but the parameterisation stays open to it.
