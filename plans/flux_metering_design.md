@@ -681,12 +681,21 @@ package goes under `src/`, not at the repository root.
 `thorlabs-apt-device` returns 200 — a real absence, not a blocked request. It ships inside
 Thorlabs' *Scientific Camera Interfaces* bundle as a local wheel plus native DLLs.
 
-As of 2026-08-30 the Python package is installed in the venv from that wheel, so `sdk/` in
-the layout above holds the bundle rather than anything importable. **The native DLLs are the
-remaining piece**: they come from `scientific_camera_interfaces-2.3-06_04_26.zip`, need a
-permanent home and a DLL search path, and none of that has been exercised — the Zelux is not
-attached to this machine, so `TLCameraSDK()` has never been loaded here. Same shape as
-Standa, and a MAST_provisioning question.
+As of 2026-08-30 the Python package is installed in the venv from that wheel.
+
+**An earlier revision said the native DLLs were "the remaining piece", needing a permanent
+home and a DLL search path. That was wrong.** The wheel bundles them: they install into
+`thorlabs_tsi_sdk/lib/`, all nine, correct architecture (x86_64 against a 64-bit Python —
+worth checking, since the wheel ships both and a 32-bit DLL under a 64-bit interpreter fails
+with an error that says nothing about architecture). There is no placement step and no PATH
+work. **The wheel is the deployment.**
+
+**The real dependency is the ThorCam driver**, which the wheel does NOT ship. Without it the
+camera enumerates as a bare `TSI` device with problem code 28 (`CM_PROB_FAILED_INSTALL`) and
+no driver, provider or service — and `discover_available_cameras()` returns an empty list, so
+the failure looks exactly like "no camera plugged in". Installing ThorCam binds it: the device
+becomes `Thorlabs Camera Zelux`, status OK, service `CYUSB3`, driver 1.2.3.14 from Thorlabs
+Scientific Imaging. That is the MAST_provisioning item.
 
 The API was confirmed by introspection on 2026-08-30 and maps onto this design directly:
 
@@ -734,8 +743,21 @@ is a second camera.
   debugging convenience, so if it is not, the mesh has to shrink.
 - **Should the reference be its own exposure** rather than the index-0 frame? (§5.5) One
   extra exposure buys a free read of the measurement noise floor whenever the argmax is 0.
-- **Do the native DLLs load?** (§14) Untested, and untestable until the Zelux is attached to
-  a machine. Everything else can be built and tested behind §14.1 in the meantime.
+- ~~**Do the native DLLs load?**~~ **Answered yes, 2026-09-02.** `TLCameraSDK()` constructs,
+  `discover_available_cameras()` returns the camera, and a full `ThorCam` cycle — open,
+  configure, two exposures, close — ran against the real hardware on its first attempt. The
+  arm/disarm cycling works, which matters because a spiral does it hundreds of times.
+
+- **The camera is a CS165MU**, serial 36555, 1440x1080, **10-bit** — so full scale is 1023 and
+  a frame is ~3 MB. Its ranges, read from the camera: gain `(0, 480)`, black level `(0, 511)`,
+  exposure `(64, 26843418)` us. A `seconds=5` run asks for 5,000,000 us, comfortably inside
+  the last of those, but anything above ~26.8 s would be refused by the range check in
+  `configure()` — which is what that check is for.
+
+- **All three ThorCam settings are integers**, not floats. The SDK's setters are `c_int`
+  throughout (`tl_camera_set_gain`, `tl_camera_set_black_level`), so a float reaches ctypes
+  and raises `TypeError: int expected` rather than being rounded. `flux_gain` was typed
+  `float` and would have failed inside a run for any non-integral value; fixed.
 - **Does a `seconds`-length ThorCam exposure saturate on a typical target?** Gain 0 and
   black level 3 are settled, and the exposure now follows the imager's, so the one unknown
   is whether ~5 s at gain 0 clips near the peak. Nothing gates or stops it, so the cost of
