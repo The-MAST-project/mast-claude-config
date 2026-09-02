@@ -1121,3 +1121,459 @@ subfolder per cell visit, each holding `unguided.csv`, `guided.csv` and `meta.js
 The `<observing-night>` label turns at **12:00 UTC**, so a whole night stays in one folder
 and carries the same date as that night's logs. Expect roughly **200 MB per unit per
 night**. Nothing needs copying by hand — the files move to the share as they are written.
+
+---
+
+## 10. The ongoing monitor — design, and what measuring a slew changed about it
+
+§5 proposed a continuous stability monitor and it was never built; §8 built the *campaign*
+instead. This section is the design for the other half — a gauge that runs on every unit all
+the time — together with the hardware measurements taken on **2026-09-02** to settle the
+numbers §5 left open.
+
+It is written as a design, not as built code. **Nothing in §10 exists yet.**
+
+### 10.1 What it is
+
+`MountStatus.stability`: a **0–100 % gauge**, 100 % = steadiest, derived from the rolling
+standard deviation of each axis's `measured_current_amps`, with the raw numbers reported
+beside it and a per-night CSV of window aggregates accumulating so the scale can eventually
+be set from data rather than chosen.
+
+**Observer only. No gate, and deliberately no `stable` boolean** — which is where this
+departs from §5.2. §5.3 already names the two occasions this repo has been bitten by a
+threshold calibrated on one population and applied to another (`MIN_CONFIDENCE`,
+`max_best_hfd_px`). A boolean in the status model is an invitation to gate on it, and the
+threshold that would make it meaningful is precisely the number that is still unmeasured.
+Expose the magnitude; let a later, evidence-backed decision add the gate.
+
+### 10.2 The measurements — two runs on mast02, 2026-09-02
+
+Both runs commanded gotos through the unit's own `PUT /mount/goto_ra_dec_j2000`, returned
+to the identical J2000 coordinate, and sampled PWI4 `/status` at 25 Hz with de-duplication
+on `axis0.position_timestamp` (~24.5 Hz of distinct samples, consistent with §6.1's 44 Hz
+server-side refresh).
+
+| run | move | samples | span |
+|---|---|---|---|
+| 1 | 5° in dec, out and back, plus a ±30″ `dec_add_arcsec` offset pair | 6076 | 251 s |
+| 2 | 3° in dec, out and back, 180 s of post-slew tail each way | 10728 | 432 s |
+
+**Floors (MAD-scaled σ of current, calm, tracking, enclosure closed):**
+
+| | axis0 | axis1 |
+|---|---|---|
+| run 1 baseline | 0.00581 A | 0.00639 A |
+| run 2 baseline | 0.00611 A | 0.00747 A |
+
+The floor is therefore **reproducible to roughly ±15 % between runs twenty minutes apart**.
+That is the variability a learned floor has to absorb, and it is small enough that a p10
+over two nights is a sound estimator. Compare §6's earlier figures — 0.0046/0.0055 A
+stationary (2026-08-28) and 0.0067/0.0060 A tracking — and the whole family sits in
+0.0046–0.0075 A. The quantisation step is 1e-05 A, so σ is 300–750× the step: **the bottom
+of the gauge is real signal, not the encoder.**
+
+### 10.3 Three questions the slew was run to answer
+
+#### Q1 — the upper anchor: *not* answered, and the slew disqualified itself as the source
+
+The intent was to replace the one invented constant with a measured ceiling. That was the
+wrong instrument, for a reason only visible after running it: **slews are excluded from the
+gauge**, so slew current cannot anchor a scale the slew never enters.
+
+What the slew does supply is the **contamination magnitude**, which is what justifies the
+contiguity rule in §10.5:
+
+| during `is_slewing` (run 1, 5° in dec) | axis0 | axis1 |
+|---|---|---|
+| σ of current | 0.0776 A = **13× floor** | 0.8416 A = **132× floor** |
+| peak \|I\| | 0.895 A | 6.014 A |
+
+And it supplies a **lower bound on the mapping's zero point**: a perfectly healthy mount,
+merely settling after its own goto, reaches ratio ≈ **2.3** (§10.4). So `R` — the ratio that
+maps to 0 % — must be comfortably above that, or routine post-acquisition settling would
+display as total instability. `R` in the 5–20 band is the defensible starting range; the
+number itself still has to come from windy tracking data, which a closed enclosure on a calm
+evening cannot produce. **`PROVISIONAL_ZERO_PERCENT_RATIO` stays provisional**, and §10.7
+says what replaces it.
+
+#### Q2 — the settle margin: 5 s was wrong by an order of magnitude, and the right answer is not a margin
+
+Run 1 first showed axis1 σ still at 1.3–2.7× the floor a full 60 s after `is_slewing`
+cleared. Run 2, with proper exclusion and a 180 s tail, resolves it:
+
+| 30 s window ending N seconds after the last excluded sample | slew out | slew back |
+|---|---|---|
+| +30 s | 1.08 / **1.24** | 0.90 / **2.28** |
+| +45 s | 1.08 / 0.90 | 0.91 / **1.57** |
+| +60 s | 1.10 / 0.90 | 0.85 / **1.28** |
+
+(ratio0 / ratio1, against that run's own baseline floor.)
+
+Two findings:
+
+- **The outbound slew settled immediately** — the first fully contiguous window was already
+  within noise. **The return took ~60 s.** The asymmetry is the hysteresis of §10.6, not
+  noise.
+- **Contiguity already buys 30 s for free.** A 30 s window containing no excluded sample
+  cannot begin until 30 s after the last excluded one. So the design does not need a settle
+  *margin* in the usual sense; it needs **one additional discarded window** after any
+  exclusion, which covers the reversal case and costs 30 s of blankness the operator can see
+  in `state`.
+
+Replace §5.4's "drop samples during motion plus a settle margin" with: **clear the window on
+any excluded sample, then discard the first window that would otherwise complete.**
+
+#### Q3 — signal ordering: `setpoint_velocity` does not lead, and it does not need to
+
+Run 2, both slews, seconds since start (`^` rising, `v` falling):
+
+```
+pwi4 is_slewing        32.45^  37.02v    232.49^  237.09v
+axis1 setpoint>1e-3    32.50^  36.56v    232.53^  236.66v
+flag Slewing(4)        33.73^  37.97v    234.02^  238.02v
+flag Moving(128)       34.53^  38.81v    234.84^  238.78v
+```
+
+`setpoint_velocity` **lags `is_slewing` by 0.05 s — one sample.** It does not lead. But the
+question mattered only for `mount_offset()`, which raises no flag and has no `is_slewing` to
+race against, and there setpoint moved **0.08 s after the command was issued**. Both cases
+are covered; the residual race is one sample wide and contiguity absorbs it.
+
+**The flag ordering result is an artefact, and the artefact is the useful part.**
+`MountActivities.Slewing` appears to lag `is_slewing` by ~1.3 s and to clear ~0.9 s late.
+It does not: [`mount.py`](../../unit/src/mount.py) calls `start_activity(Slewing)` *before*
+`pw.mount_goto_ra_dec_j2000`. The lag is entirely the measurement path — `/unit/mount/status`
+takes **0.70 s** to answer (and `/unit/status` takes **5.85 s**, which is why run 1's mask
+column came back empty: a 3 s client timeout against a 5.85 s endpoint failed all 76 attempts
+it managed in 250 s).
+
+The design consequence is concrete: **the monitor must read activity flags in-process via
+`self.mount.is_active(...)`, never over HTTP.** Through HTTP the flag is ~1.5 s stale, which
+is 15 samples at 10 Hz.
+
+`Moving(128)` trails `Slewing` by a further ~0.8 s in both directions — the `is_moving`
+rms-error test lagging, exactly as its definition implies.
+
+### 10.4 The three layers, so the invented number is isolated
+
+**Layer 1 — measurement.** Rolling σ per axis, reported verbatim with `n`, `n_excluded`,
+`window_seconds`, `sample_hz`, `sample_age`. Nothing invented.
+
+**Layer 2 — ratio to a learned floor.** `ratio_axisN = σ_axisN / floor_axisN`.
+Dimensionless, ≈1 when calm: *this axis is working N× harder than its own quietest observed
+state.* **Normalise per axis before combining** — the two axes have different floors and
+different loads, so combining σ first lets the structurally noisier axis dominate for
+reasons of scale rather than disturbance. Report both, and `ratio = max(...)`.
+
+**Layer 3 — the percentage, the only invented thing.**
+
+```
+percent = 100 * (1 - log(clamp(ratio, 1, R)) / log(R))
+```
+
+Linear in log-ratio: 100 % at ratio 1, 0 % at `R`, bounded by construction. **Linear rather
+than a logistic** (sky_quality's shape) because a logistic has a knee, and placing a knee
+asserts where "good" becomes "bad" — the precise thing that is unmeasured.
+
+`R` = `PROVISIONAL_ZERO_PERCENT_RATIO` carries a `#:` provenance block in the
+`MIN_CONFIDENCE` style recording: the floors of §10.2, the ratio ≈2.3 healthy-settling lower
+bound, that **no reading under wind has ever been taken**, that a wrong value compresses or
+saturates a display and gates nothing, and that p95 of `ratio` from the campaign's windy
+nights replaces it. A `MAPPING_VERSION` rides on the status and every log row so any stored
+percentage can be re-derived — the `MESH_VERSION` lesson from §8.
+
+**Insufficient data is `percent = None`, never `0.0`.** This is the explicit fix for
+[`sky_quality.py:112`](../../unit/src/science/sky_quality.py#L112), which sets
+`score_0_to_100 = 0.0` during warm-up. To be fair to it, `quality_state = WarmingUp` sits on
+the next line, so the discriminator does exist — but the *score field itself* reads as
+"terrible" to anything that plots it, and a nested object that is present-with-`None` says
+the same thing without needing the reader to know about a second field.
+
+### 10.5 Exclusion — what a sample must not be
+
+The predicate returns a **reason string or `None`**, so exclusions are counted by cause.
+
+**Do not exclude on `Mount.is_moving` / `MountActivities.Moving`.** It is
+`axis0.rms_error_arcsec > 3.0 or axis1.rms_error_arcsec > 1.0` — a tracking-*quality* test
+mimicking PWI4's GUI. Measured in wind on 2026-07-21, **tracking on target with
+`is_slewing=False`**, axis0 rms ran 1.36–3.81″ and axis1 1.00–6.40″, making `is_moving` true
+in **6 of 7 samples**. Excluding on it discards precisely the windy samples the gauge exists
+to measure. This gets a loud comment and a named regression test.
+
+Exclude on, in this order:
+
+| test | evidence |
+|---|---|
+| PWI4 `mount.is_slewing` | direct |
+| `Slewing\|Parking\|FindingHome\|Dancing\|Aborting\|StartingUp\|ShuttingDown`, read **in-process** | §10.3 Q3 |
+| not tracking | a stationary mount is a different regime; admitting it lets a stationary floor reinforce itself |
+| axis0 `setpoint_velocity` departing from sidereal, or axis1 from 0, by **> 1e-3 °/s** | §10.5 below |
+| the window's first completed window after any of the above | §10.3 Q2 |
+
+#### Discriminate on `setpoint_velocity`, not on `dist_to_target`
+
+`dist_to_target` is the second instance of the `is_moving` trap:
+
+| | calm (2026-09-02) | windy (2026-07-21) |
+|---|---|---|
+| \|dist_to_target\| | median 0.03″, max 0.14″ | **0.06–5.89″**, tracking on target |
+
+A `dist_to_target > 0.5″` test — `wait_until_settled`'s default tolerance — passes in calm
+and **excludes most windy samples**. The 2026-07-21 note says it directly: *"following
+distance itself gusts to ~5.9″, so `wait_until_settled`'s 0.5″ default tolerance is unusable
+here."* Log `dist_to_target`; use it at most as a very loose sanity bound at tens of
+arcseconds, never at 0.5″.
+
+`setpoint_velocity` has the opposite character because it is **commanded intent, not
+response** — wind perturbs the measurement and never the setpoint.
+
+#### The threshold, measured — and a correction to the margin originally claimed
+
+Over 3643 calm tracking samples:
+
+- axis1 `|setpoint_velocity|` reaches **7.6e-05 °/s**, p99 5.7e-05, and is **nonzero in 1331
+  of 3643 samples**. It is *not* identically zero while tracking, so a threshold at 1e-4 —
+  the obvious choice — sits only 1.3× above observed noise.
+- axis0 setpoint spans 0.004140–0.004241 °/s around a sidereal 0.004178, a spread of 1.0e-04.
+
+**The threshold is 1e-3 °/s**: 13× above tracking jitter, and 60× below the quietest
+departure any real move produced.
+
+The margin claimed while planning — *"a slew runs to 20 °/s, ~4800× sidereal, so the
+separation is unambiguous"* — **is wrong for the axis that was not commanded.** During a
+5° dec slew, axis0 setpoint only departed to −0.053…+0.062 °/s, some 15× sidereal, because
+axis0 was merely tracking through it. 1e-3 still catches that comfortably; the reasoning
+behind it needed correcting.
+
+#### The gradual-offset test covers almost nothing, and the offset kind that matters is the other one
+
+Planned: exclude on `gradual_offset_progress` in flight, handling its **signed** convention
+(`_gradual_ramp_complete` in `mount.py` already does, correctly: completion is
+`|progress| >= 1.0`, since a negative offset ramps 0 → −1.0).
+
+Measured: through both a +30″ and a −30″ `dec_add_arcsec`, **`gradual_offset_progress`
+stayed pinned at 1.000 and never dipped.** That is correct behaviour, not a bug — it is
+`SettleMode.OFFSET_STEP`, and only `OFFSET_GRADUAL` moves the progress field.
+
+This matters because **the offsets the code actually issues are mostly `OFFSET_STEP`**:
+spiral search (`spiral_search.py`) and exposure-series offsets (`unit.py`) both use discrete
+`add_arcsec` and `wait_until_settled(SettleMode.OFFSET_STEP)`. So the gradual-progress test
+would have excluded almost nothing in practice.
+
+`setpoint_velocity` caught it: **61 of 602 samples above 1e-3, first at +0.08 s, last at
++5.94 s** — a 30″ offset takes about 6 s of commanded motion. Keep the gradual-progress test
+for the `OFFSET_GRADUAL` path, but it is a supplement; **`setpoint_velocity` is the
+load-bearing discriminator**, and there is no `MountActivities.Offsetting` to fall back on.
+
+#### Window contiguity, not sample dropping
+
+**Clear the window on any excluded sample**, so a window is always a contiguous run. This
+keeps `n` honest, stops two pointings' samples being stitched into one σ, and means a
+partially contaminated window is *discarded* rather than reported. Given contamination of
+13–132× floor (§10.3 Q1), the property worth having is that contamination costs a window of
+blankness and can never produce a wrong number.
+
+The gauge therefore goes blank for one to two windows after every acquisition slew. That is
+the correct answer and satisfies §5.4's "make unknown visible".
+
+### 10.6 The statistic, the window, and a hysteresis nobody was looking for
+
+**MAD-scaled σ (`1.4826 × MAD`) primary, plain `pstdev` alongside.** Both estimate the same
+quantity; the robust one is not hostage to a single unexcluded micro-offset, which inflates
+the plain estimate quadratically. Reuse `median_absolute_deviation` from
+[`sky_quality.py:15`](../../unit/src/science/sky_quality.py#L15), moved to `common/` now it
+has two consumers. Subtracting the window median also absorbs slow gravity-load drift.
+
+**The 30 s window is not arbitrary, and run 2 shows why a longer one is worse.** Computing σ
+over a whole 180 s phase versus over 30 s windows inside it:
+
+| phase | axis | σ over the whole phase | rolling 30 s windows |
+|---|---|---|---|
+| `settle_out` | axis0 | 0.01281 A (ratio **2.10**) | ratio 1.08–1.12 |
+| `settle_back` | axis1 | 0.04585 A (ratio **6.14**) | ratio 0.86–1.57 |
+
+The long-span figures are inflated by **slow drift, not jitter**. A σ taken over minutes
+measures the drift; a σ taken over 30 s measures the disturbance the gauge is about. Do not
+lengthen the window to get more samples.
+
+**An unplanned finding: axis1 current is hysteretic in approach direction.** At the *same*
+mechanical position, axis1 mean current was:
+
+| | axis1 mech | mean current |
+|---|---|---|
+| run 1, before the excursion | 48.8551° | **−1.8640 A** |
+| run 1, after returning | 48.8537° | **−0.7481 A** |
+| run 2, before | 48.8512° | −0.9625 A |
+| run 2, after returning | 48.8492° | −0.7834 A |
+
+A spread of about **1.1 A at one position**, depending on how it was approached. Two
+consequences:
+
+- It is direct evidence for the design's choice of **σ and never the mean** — a mean-based
+  gauge would read wildly differently at the same pointing for no disturbance reason.
+- The learned floor is **not purely a property of the mount**; it carries some dependence on
+  approach history. A p10 over ~2 nights averages across approaches, which is the right
+  shape, but the effect belongs in the log and in the constant's provenance.
+
+It also explains the settle asymmetry of §10.3 Q2: the direction-reversing return is the one
+that took 60 s.
+
+### 10.7 The floor
+
+Push each completed window's σ into a `deque(maxlen≈2400)` (~2 nights); the floor is the
+**p10, not the minimum** — the minimum is the noisiest order statistic and one dropout would
+define it forever. Require ~1 hour of windows before using it; until then use the §10.2
+measurements as a bootstrap and report `floor_source="bootstrap"`.
+
+Note the direction of that bootstrap error: the **tracking floor sits above the stationary
+floor** (stationary excludes torque ripple and cogging), so a stationary bootstrap makes the
+gauge read **pessimistically**. That must be visible in the status, not merely described as
+"provisional".
+
+Persist as a `MountStabilityCalibration` in `common/config/calibration.py` — a learned floor
+is a calibration, not telemetry, so it belongs with the machine-written records that already
+carry provenance, and it gets `matches()` for free. The gate is load-bearing: **a floor
+learned at a different `window_seconds`, `sample_hz` or statistic is not the same
+statistic**, and silently reusing one would be `MIN_CONFIDENCE` a third time.
+
+Write **once after the first hour and on stop — never per window.** §5.5 forbids coupling
+observing-time writes to the config DB, and the write must be wrapped so a `ConfigError`
+never reaches the monitor thread.
+
+**Open, and it decides whether even that is allowed:** whether `Config.set_unit` bumps a
+generation that `common/config/_watcher.py` propagates to running components. If it does,
+hourly floor writes are wrong and persistence must be shutdown-only.
+
+### 10.8 Shape of the implementation
+
+| file | | contents |
+|---|---|---|
+| `unit/src/PlaneWave/fast_status.py` | new | `Pwi4StatusPoller` — persistent `httpx.Client(trust_env=False)`, field-restricted `key=value` parse, dedupe on `axis0.position_timestamp` |
+| `unit/src/mount_stability.py` | new | exclusion predicate, window, statistic, floor learner, mapping, CSV writer, monitor |
+| `common/models/statuses.py` | edit | `MountStabilityStatus`; `MountStatus.stability` |
+| `common/config/mount.py` | edit | `MountStabilityConfig`, all defaulted (no DB migration) |
+| `common/config/calibration.py` | edit | `MountStabilityCalibration` + `matches()` |
+| `common/paths.py` | edit | `make_stability_monitor_folder()` |
+| `unit/src/mount.py` | edit | construct the monitor; pass `stability=` in `status()` |
+| `unit/tests/test_mount_stability.py` | new | §10.9 |
+
+**The poller.** The vendored `pwi4_client.py` uses `urllib.urlopen` — a fresh TCP connection
+per call, fine at 2 s, wrong at 10 Hz. `TelemetrySampler` in §8's `stability_campaign.py`
+already solves this; extract **only the poller** to `fast_status.py` on `main` and let the
+campaign delegate to it. `trust_env=False` is load-bearing and must survive with its comment:
+WinINET *registry* proxy settings otherwise route even `127.0.0.1` through the site proxy,
+which answers 403. Take the field tuple as a constructor argument so campaign and monitor
+cannot drift into a shared constant. Derive the URL from `Mount.pw.host`/`.port`.
+
+**Not `RepeatTimer` at 10 Hz.** `common/utils.py` is `while not self.finished.wait(interval)`,
+so the period is `interval + function duration` and drifts — invisible at 2 s, not at 0.1 s.
+Use a daemon thread with a monotonic-deadline loop. (Both measurement scripts did exactly
+this and held 24.5 Hz against a 25 Hz request with zero dropped polls, which is the shape
+being recommended.)
+
+**Status.** `MountStabilityStatus` nested as `MountStatus.stability`, carrying `state`,
+`percent`, `ratio` (+ per axis), σ per axis, servo-error σ, floor per axis, `floor_source`,
+`calibrated`, `mapping_version`, window/rate, `n_samples`, `samples_excluded`,
+`excluded_reason`, `sample_age_seconds`, `latest_update`. **100 % = most stable**, documented
+and tested, because the phrase is ambiguous.
+
+The nested object is `None` only when the monitor was never constructed; when it exists
+without data it is **present** with `state="Unknown"` and `percent=None`, so a GUI can tell
+"no such capability" from "no data yet".
+
+`unit/tests/test_status_fields_are_populated.py` statically requires every `MountStatus`
+field to be passed **by keyword** at the construction site, so `Mount.status()` must
+literally read `stability=self.stability.status() if self.stability else None`. **That
+snapshot read must never touch the network** — `/unit/mount/status` already costs 0.70 s
+(§10.3 Q3) and must not also inherit the monitor's PWI4 latency.
+
+**Log.** One row per completed window to
+`<share>/<hostname>/<observing-night>/Stability/monitor/` via
+`make_stability_monitor_folder()` — named distinctly from §8's `make_stability_folder` to
+avoid a collision, but a deliberate sibling so both land in one tree. ~1200 rows/night.
+Columns: timestamps, n, excluded + reasons, σ (both estimators) and mean per axis,
+servo-error σ, setpoint velocity, alt/az, max `dist_to_target`, `is_tracking`, activity mask,
+floors, `floor_source`, ratio, percent, `mapping_version`, rate/window/statistic. Plus a
+per-night `meta.json` recording that `activities_mask` **may contain `Moving` on windy nights
+and that this is logged, never excluded on** — so an analyst months later does not filter on
+it.
+
+**Rotate every 30 minutes and on the 12:00 UTC rollover.** Do *not* hold
+`MoveGuardian().protect()` open all night: `protect()` claims the folder until
+`release_folder()` reaps it after `_RELEASE_TIMEOUT_SEC = 600`, so an eight-hour claim would
+block `Filer.move` on that folder for the night. §8's campaign escapes this only because its
+dwell is 60 s. Rotation also caps crash loss at one file.
+
+Raw per-sample CSV stays behind a flag, default **off** — §8 already exists to capture raw at
+full rate.
+
+**Robustness.** The monitor swallows every exception, counts consecutive failures, and
+disables itself with one log line past a threshold. A new 10 Hz thread must not be able to
+take down the mount component.
+
+### 10.9 Verification
+
+Against a synthetic injected poller (the `test_spiral_search.py` pattern):
+
+- the exclusion table: `is_slewing`; each activity bit; not tracking; setpoint above and
+  below 1e-3; `gradual_offset_progress = -0.4` → excluded (pins the signed-progress
+  convention); `offsets` absent → not excluded, no crash
+- **`test_a_high_rms_error_does_not_exclude_a_windy_sample`** — `rms_error_arcsec = 9.0`,
+  tracking, `is_slewing=False` → **not excluded**; the docstring carries the 6-of-7 evidence
+- **`test_a_discrete_offset_is_excluded_by_setpoint_velocity_alone`** — the run-1 case:
+  `gradual_offset_progress` pinned at 1.0 throughout, setpoint above 1e-3 → excluded
+- **`test_insufficient_data_is_none_not_zero`** — names the `sky_quality` wart it prevents
+- statistic: a synthetic trace of known σ; one outlier moves `pstdev` a lot and MAD little
+- contiguity: one excluded sample mid-window clears it, `percent` returns to `None`, and the
+  next window to complete is also discarded
+- mapping: `percent(1)==100`, `percent(R)==0`, monotone, **bounded 0–100 for
+  ratio ∈ {0, 0.5, 1, R, 10R, inf, nan}**
+- **`test_the_floor_is_learned_from_the_calm_tail_not_the_average`** — 90 % windy windows,
+  10 % calm; the floor lands on the calm value
+- `matches()` rejects a floor stored at a different window/rate/statistic → falls back to
+  bootstrap
+- poller: canned `/status` text in `tests/fakes/`; field extraction, dedupe on a repeated
+  timestamp, a raising callable counted as a dropped poll, and **no `httpx.Client`
+  constructed when a callable is injected**
+
+On hardware: `MountStatus.stability` populates within one window; `samples_excluded` rises
+during a slew and the gauge **blanks rather than dipping**; the CSV appears on the share and
+rotates; a calm reading sits near ratio 1 against the §10.2 floors.
+
+### 10.10 Sequencing
+
+0. Pure additions, no behaviour: move `median_absolute_deviation`; add the status model,
+   config, calibration model, `PathMaker` method. Small PR — the piece most likely to
+   conflict with §8's branch.
+1. `fast_status.py` + tests, no caller yet; the campaign rebases onto it.
+2. `mount_stability.py`, fully tested with an injected poller, not yet wired.
+3. Wire into `Mount`; CSV writer with rotation.
+4. Floor persistence — subject to the `_watcher` question in §10.7.
+5. **Only once campaign data exists:** replace the provisional ratio, set `calibrated=True`.
+   Turning the gauge into a gate is a separate decision needing its own evidence.
+
+### 10.11 Deliberately out of scope
+
+- **No gate, no `stable` boolean** — departs from §5.2, see §10.1.
+- **No `is_moving` refactor.** Splitting it into `is_slewing` + `tracking_quality` was agreed
+  on 2026-07-21 and deferred; §10 delivers only the *reading* half. The refactor also has to
+  fix `autofocusing.py`, which by the same measurement stalls ps3cli autofocus in wind, and
+  that touches an operational path. Its own PR.
+- **No wind-bearing binning.** §5.4 wants `(altitude, |az − wind bearing|)`; v1 has one
+  global floor with alt/az on every row so a binned floor is derivable offline. §5.4's
+  binning is a requirement for a *gate*; this is an observer.
+- **`sky_quality`'s warm-up `0.0`** is live today and is a one-line fix. Worth its own PR.
+
+### 10.12 Still open
+
+- **The 0 % anchor.** Needs windy tracking data. Until then `R` is a chosen number in the
+  5–20 band with a lower bound of ~2.3 established by healthy settling.
+- **Guiding.** PHD2 corrects continuously during an acquisition. If those corrections reach
+  the mount as PWI4 offsets they will move `setpoint_velocity` constantly and the gauge will
+  be permanently blank for most of the observing night — which would be fatal to the whole
+  idea. If instead PHD2 drives the mount by another path, the corrections appear only in the
+  axis telemetry and the gauge measures *residual after guiding*, a different but still
+  meaningful quantity. **This was not measured and must be, before Stage 2.** It is the
+  single largest unknown remaining in this design.
+- **`Config.set_unit` and the config watcher** (§10.7).
