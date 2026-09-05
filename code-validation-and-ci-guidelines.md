@@ -1,8 +1,9 @@
 # Code validation and CI — MAST guidelines
 
 Cross-repo standards for linting, testing and continuous integration. Derived from the
-work done on `MAST_common` and `MAST_unit` on 2026-08-09; **`MAST_spec`, `MAST_control`
-and `MAST_gui` have none of this yet** and should follow it when they get it.
+work done on `MAST_common` and `MAST_unit` on 2026-08-09 and extended to `MAST_spec` on
+2026-09-05; **`MAST_control` and `MAST_gui` have none of this yet** and should follow it
+when they get it.
 
 Everything here is written down because it was learned the expensive way. Where a rule
 exists because something actually broke, the incident is named — those notes are the
@@ -49,6 +50,13 @@ jobs:
 **Why separate:** if lint failures fail the test job, a red lint hides whether the suite
 passed — and on `MAST_common` it hides *which platform* passed. The two answer different
 questions and must be readable independently.
+
+**The one exception so far is `MAST_spec`, which has no test job** (`MAST_spec#57`). Not
+merely because it has no tests: `import spec` blocks indefinitely on a bare checkout,
+reaching for the config database and the operational share, so a test job would hang the
+build or pass having proved nothing (§3.2). Lint alone is the honest signal until the
+modules import without hardware. Do not read it as licence to skip the test job elsewhere;
+`MAST_unit`'s workflow is the template for adding one back.
 
 **Lint runs on Linux regardless of the repo's platform.** Ruff never imports the code, so
 it needs neither Windows nor the dependency install — only `requirements-dev.txt`, which
@@ -280,15 +288,25 @@ contracts broadly — treat it as a reviewed change, not as lint.
 
 ### `MAST_common` is consumed by four repos
 
-A change here is a change everywhere. Two mechanisms are in play and the submodule is
-being phased out:
+A change here is a change everywhere. All four consumers now take `common` the same way:
+a **sibling clone** in the flat layout — `<top>/common/` beside `<top>/unit/`,
+`<top>/control/`, `<top>/spec/` or `<top>/gui/` — put on `sys.path` by the `mast.pth`
+MAST_provisioning writes into each venv. **There is no submodule anywhere any more**:
+retired in `MAST_unit#94` (2026-08-06), then `MAST_spec#33`, `MAST_control#19` and
+`MAST_gui#18`.
 
-- `MAST_unit` — **sibling clone** in the flat layout (`<top>/common/`, `<top>/unit/`),
-  put on `sys.path` by the `mast.pth` MAST_provisioning writes into the venv. No
-  submodule (`MAST_unit#94`).
-- `MAST_control`, `MAST_spec`, `MAST_gui` — still submodules at `./common/`. See the
-  TODO in `MAST_common/CLAUDE.md`; verify per project how `common` reaches `sys.path` at
-  runtime before removing anything.
+In every case the gitlink was resolving nothing. The `.pth` already provided `common`, so
+the submodule was a second, stale mechanism shadowing the one actually in use —
+`MAST_control` and `MAST_spec` were both pinned at the same commit, several merges behind.
+An *uninitialised* submodule directory is a live hazard in its own right: an empty
+directory Python can treat as a namespace-package portion named `common`, which also makes
+ruff's first-party classification machine-dependent.
+
+**Nothing now records which `MAST_common` commit a consumer was built against.** The
+gitlink was that record, for all its faults; `MAST_common#34` tracks the gap. CI is the
+partial answer, since it builds against `MAST_common`'s `master` — a breaking change there
+turns a consumer red without anything in that consumer having moved, which is exactly how
+the machines are deployed.
 
 In CI, reproduce the layout the machines actually use. For `MAST_unit` that is two
 checkouts side by side plus `PYTHONPATH: ${{ github.workspace }}` standing in for
