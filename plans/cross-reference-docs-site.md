@@ -37,10 +37,11 @@ This is the load-bearing step. Without it, every cross-reference into `MAST_comm
 breaks at precisely the boundary the site exists to illuminate. `MAST_unit`'s CI already
 does this two-checkout arrangement (`MAST_unit#103`) and can be copied.
 
-Note the layout is not uniform across the fleet: `MAST_unit` consumes `common` as a
-sibling clone, while `control`, `spec` and `gui` still submodule it at `./common/`. The
-docs build should impose the sibling layout on all of them rather than initialise
-submodules, so one arrangement produces one cross-referenced tree.
+The layout is uniform across the fleet: `unit`, `control`, `spec` and `gui` all take
+`common` as a sibling clone, the submodule having been retired everywhere (`MAST_unit#94`,
+then `MAST_spec#33`, `MAST_control#19`, `MAST_gui#18`). The docs build reproduces that
+layout and nothing more — there is no per-repo variation to normalise and no submodule to
+initialise.
 
 ## Code documentation and navigation
 
