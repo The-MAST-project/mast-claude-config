@@ -2,12 +2,12 @@
 
 *Continuation plan for `MAST_spec` after 2026-09-05, when the repo went from 119 ruff
 findings to zero, gained its first CI, and had three acquisition-path bugs fixed. Every
-claim here was checked against `master` at `562a1a1` and against a `common` clone in sync
-with origin -- 0 behind, 0 ahead -- rather than inferred. Nothing was measured by running
-the service, because the service cannot be run off the telescope (§3).*
+claim here was checked against a `common` clone in sync with origin -- 0 behind, 0 ahead --
+rather than inferred. Nothing was measured by running the service, because the service
+cannot be run off the telescope (§3).*
 
-**Status: current as of 2026-09-05.** One item has an external deadline that is not in this
-repo's control (§2.1). One item unlocks three others (§3).
+**Status: current as of 2026-09-06, `master` at `49af872`.** §2.1 is done. One item unlocks
+three others (§3), and it is now the top of the list in everything but numbering.
 
 ---
 
@@ -19,8 +19,8 @@ repo's control (§2.1). One item unlocks three others (§3).
 | `ruff format --check` | passing |
 | CI | lint only, blocking, `ubuntu-latest`, ruff pinned at 0.16.0 |
 | Branch protection | on: requires `lint`, no up-to-date requirement, 0 required reviews, admins can override |
-| Routes served | **43, all GET** |
-| `@endpoint` declarations | **0** of 43 |
+| Routes served | **44**; 43 GET-only, `/spec/abort` accepts GET and PUT (§2.1) |
+| `@endpoint` declarations | **0** of 44 |
 | Tests | none, and none possible today (§3) |
 
 The lint work is finished and enforced. What remains is **contract debt against
@@ -32,36 +32,51 @@ The lint work is finished and enforced. What remains is **contract debt against
 
 Numbered by order, not by size.
 
-### 2.1 Accept `PUT` on abort -- this one has a removal date
+### 2.1 Serve `/spec/abort` at all -- DONE 2026-09-06, MAST_spec#69
 
-`MAST_common`'s plan client already aborts **units** with `PUT` (MAST_common#98). The
-spectrograph is carried by an explicit exception, and the comment granting it says exactly
-why it exists:
+*This section originally read "accept `PUT` on abort", on the assumption that a route
+existed and had the wrong verb. Investigating it found no route at all. The corrected
+account is kept because the mistake is instructive: the `MAST_common` comment that framed
+this as a verb migration was itself working from that assumption.*
+
+`MAST_common`'s plan client aborts the spectrograph with
 
 ```python
-# The spectrograph stays on GET: MAST_spec's abort route has not been checked for
-# PUT, and breaking it to tidy the units would trade one silent failure for another.
-# Same migration, separately (MAST_common#51, removal on #113).
 tasks.append(self.api_coroutine(self.spec_api, method="GET", sub_url="abort"))
 ```
 
-When that line goes, **spec answers 405 on the fleet's abort path**. The same comment, about
-the units half of the migration, calls that "the last verb that should fail quietly".
+`SpecApi.base_url` is `http://<host>:<port>{BASE_SPEC_PATH}` and `get(sub_url)` appends
+`/{sub_url}`, so the request is `GET /mast/api/v1/spec/abort`.
 
-The deadline is not in this repo's control and nothing here will warn about it. The fix is
-small -- `methods=["GET", "PUT"]` on the abort routes for a migration window, then drop
-`GET` -- and doing it alone removes the exposure without waiting for §2.2.
+**`spec.py` did not register that route.** It served `status`, `startup`, `shutdown`,
+`powerdown`, `acquire` and four `simulate/...` routes at that base. Every `/abort` in the
+repo was on a sub-path the client never asks for -- `/deepspec/abort`, `/highspec/abort`,
+`/fw/abort`, `/stages/abort` -- so the fleet's spectrograph abort had been answering **404**
+every time it was called, not 405 at some future point.
 
-Abort routes: `deepspec.py`, `highspec.py`, `filter_wheel/wheel.py`, `stage/stage.py`, and
-one commented out in `cameras/andor/newton.py`.
+`Spec.abort()` existed all along and does the right thing
+(`traverse_components_and_call("abort")`). It was simply never routed. MAST_spec#69
+registers it with `methods=["GET", "PUT"]`, so neither side has to be deployed first.
 
-Blocks: **MAST_common#51** (open).
+**This unblocks MAST_common#51.** The comment holding the client on `GET` says spec's abort
+route "has not been checked for PUT" -- there was no route to check. The client can move to
+`PUT` whenever it likes; `GET` comes out on MAST_common#113.
+
+**Still unverified:** the route was confirmed by parsing `spec.py`, not by serving it,
+because of §3. One `curl` against `mast-ns-spec` would settle it, and that is the one
+remaining action on this item.
 
 ### 2.2 Give state-changing routes a verb
 
-**Not one of spec's 43 `add_api_route` calls passes `methods=`**, so FastAPI's default
-applies and `startup`, `shutdown`, `abort` and `expose` are all served as `GET`. §2.1 is one
-instance of this; doing §2.2 properly subsumes it.
+**Only one of spec's 44 `add_api_route` calls passes `methods=`** -- the abort route added
+in §2.1 -- so FastAPI's default applies everywhere else and `startup`, `shutdown`,
+`powerdown`, `acquire` and `expose` are all served as `GET`.
+
+Note what §2.1 turned out to be: not a verb on an existing route, but a route that was never
+registered. That is worth carrying into this item. The question for each of the remaining 43
+is not only "which verb" but "does anything actually call this, and at the path it expects" --
+MAST_spec#47 records a second instance of the same class, where the plan client calls
+`execute_assignment` and this repo has that registration commented out.
 
 Tracked: **MAST_spec#56** ("34 GET-by-default routes, and the two the plan client already
 calls").
