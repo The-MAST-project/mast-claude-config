@@ -6,8 +6,9 @@ claim here was checked against a `common` clone in sync with origin -- 0 behind,
 rather than inferred. Nothing was measured by running the service, because the service
 cannot be run off the telescope (§3).*
 
-**Status: current as of 2026-09-06, `master` at `49af872`.** §2.1 is done. One item unlocks
-three others (§3), and it is now the top of the list in everything but numbering.
+**Status: current as of 2026-09-06, `master` at `483f6f1`.** §2.1 and §2.2 are done, and
+the client half of the abort migration went with them (MAST_common#100). §2.4 -- the import
+blocker -- now unlocks more than anything else on the list, whatever its number says.
 
 ---
 
@@ -19,7 +20,7 @@ three others (§3), and it is now the top of the list in everything but numberin
 | `ruff format --check` | passing |
 | CI | lint only, blocking, `ubuntu-latest`, ruff pinned at 0.16.0 |
 | Branch protection | on: requires `lint`, no up-to-date requirement, 0 required reviews, admins can override |
-| Routes served | **44**; 43 GET-only, `/spec/abort` accepts GET and PUT (§2.1) |
+| Routes served | **44**: 35 PUT (state-changing), 9 GET (readers) -- §2.2 |
 | `@endpoint` declarations | **0** of 44 |
 | Tests | none, and none possible today (§3) |
 
@@ -62,24 +63,48 @@ registers it with `methods=["GET", "PUT"]`, so neither side has to be deployed f
 route "has not been checked for PUT" -- there was no route to check. The client can move to
 `PUT` whenever it likes; `GET` comes out on MAST_common#113.
 
-**Still unverified:** the route was confirmed by parsing `spec.py`, not by serving it,
-because of §3. One `curl` against `mast-ns-spec` would settle it, and that is the one
-remaining action on this item.
+**The client half followed the same day.** MAST_common#100 moved
+`Plan.abort()`'s spectrograph call from `GET` to `PUT`, which it had to once §2.2 made the
+route `PUT`-only. Both call sites in that method now read `method="PUT"`.
 
-### 2.2 Give state-changing routes a verb
+**MAST_common#51 is deliberately still open.** Its definition of done is "verified against a
+unit running the swept routes", and nothing here has touched hardware. The code is in place
+in both repos; the verification is not, and closing the issue on a code change would repeat
+the mistake that produced the 404 -- a note asserting a route's state that nobody checked.
 
-**Only one of spec's 44 `add_api_route` calls passes `methods=`** -- the abort route added
-in §2.1 -- so FastAPI's default applies everywhere else and `startup`, `shutdown`,
-`powerdown`, `acquire` and `expose` are all served as `GET`.
+**Still unverified here too:** the route was confirmed by parsing `spec.py`, not by serving
+it, because of §3. One `curl` against `mast-ns-spec` settles it.
 
-Note what §2.1 turned out to be: not a verb on an existing route, but a route that was never
-registered. That is worth carrying into this item. The question for each of the remaining 43
-is not only "which verb" but "does anything actually call this, and at the path it expects" --
-MAST_spec#47 records a second instance of the same class, where the plan client calls
-`execute_assignment` and this repo has that registration commented out.
+### 2.2 Give state-changing routes a verb -- DONE 2026-09-06, MAST_spec#70
 
-Tracked: **MAST_spec#56** ("34 GET-by-default routes, and the two the plan client already
-calls").
+**PUT-only, in one step.** 35 state-changing routes now declare `methods=["PUT"]`; the 9
+readers -- `/status`, `/position`, the wheel listing -- stay `GET`.
+
+A dual-verb window was written first and then replaced with the end state, deliberately: a
+window's cost is that nothing ever forces the callers to move, so the routes sit accepting
+either indefinitely. Taking the break in one step puts the remaining work where it actually
+lives, which is mostly `MAST_control`.
+
+**The break is real and was accepted knowingly.** Any caller still sending `GET` to a
+state-changing spec route gets 405. The one that mattered was `MAST_common`'s plan client,
+whose abort call moved to `PUT` in MAST_common#100 the same day; `MAST_gui` and anything
+driven by hand or bookmark have not been updated. The reasoning and the known callers are
+recorded above `spec.py`'s route list, so whoever meets a 405 finds the answer at the routes.
+
+**A count correction, because it produced a confident wrong number.** This repo was never
+"43 routes, all GET". Nine already declared `PUT` -- five in `highspec.py`, four
+`simulate/...` in `spec.py`. A `grep -c "methods="` restricted to lines that also contained
+`add_api_route` missed every one of them, because those registrations span several lines and
+the keyword sits on a different line. Re-measured by parsing the AST. **34 GET-by-default**
+is exactly what MAST_spec#56's title said, and #56 was right the whole time.
+
+**Not done here, and not planned:** enumerating every route a consumer calls and diffing it
+against what spec serves. §2.1 and MAST_spec#47 are two known instances of a client asking
+for something spec does not serve, so the audit would likely find more -- but it was
+considered on 2026-09-06 and declined. Do not pick it up from this document without asking.
+
+**Still open from this:** the handlers return bare values or `None` rather than a
+`CanonicalResponse`. That is the `enveloped()` half of MAST_spec#56 and arrives with §2.3.
 
 ### 2.3 Adopt the endpoint contract
 
@@ -209,6 +234,21 @@ the two abort fixes.
 Also: branch protection enabled on `master`; MAST_spec#63 closed as not-planned; #68 opened;
 and three stale claims corrected in this repo (#12), one of which had been copied into a
 plan document *and had work prescribed around it*.
+
+## 5a. What landed on 2026-09-06
+
+**MAST_spec#69** -- `/mast/api/v1/spec/abort` is served at all. `Spec.abort()` had existed
+and been routed nowhere, so the fleet's abort path had been answering 404.
+**MAST_spec#70** -- 35 state-changing routes to `PUT`, 9 readers left on `GET`.
+**MAST_common#100** -- the plan client aborts the spectrograph with `PUT`, closing the window
+#70 opened.
+
+A theme across all three: each was framed as one problem and turned out to be another.
+"Add `PUT` to the abort route" found no route; "43 routes, all GET" was 34, because the
+measurement missed multi-line registrations; and MAST_common#51's step 2 instructs consumers
+to bump a submodule gitlink that has not existed since MAST_unit#94. That last one is now
+the **third** document found carrying the stale submodule claim, after this repo's CI
+guidelines and its docs-site plan -- both corrected in #12.
 
 ---
 
