@@ -173,9 +173,24 @@ layer earlier and strictly worse, since it needs no service: pytest collection, 
 or an editor's language server is enough. They share the principle from
 `MAST_unit.2024-12-12#118` but not the fix, and fixing either alone leaves the other.
 
-### 2.5 Exercise the changes on the instrument -- THE ONLY ITEM LEFT
+### 2.5 Exercise the changes on the instrument -- PARTLY DONE 2026-09-06
 
 **Everything else on this list is done. This is where all of the accumulated risk sits.**
+
+**Update, 2026-09-06 evening.** The service was run on the instrument four times. That
+settled the HTTP surface and the startup path, and left the abort and acquisition paths
+untouched. What is now verified live:
+
+- the service starts, all four Deepspec bands connect, `/docs` and `/openapi.json` answer
+- `/spec/fw/status`, `/spec/fw/position`, `/spec/stages/status`, `/spec/chiller/status`,
+  `/spec/deepspec/status`, `/spec/highspec/status`, `/spec/status` all answer as
+  `CanonicalResponse` envelopes
+- `why_not_operational` reports genuine conditions (`highspec: camera is CoolingDown`, and
+  the two filter wheels that are physically absent)
+
+**Still unexercised, and still the accumulated risk:** the abort path on all three cameras,
+and the acquisition path. Neither has been driven once. An abort issued mid-readout remains
+the single most valuable test on this list.
 
 Three days of change are on `master` and **none of it has been run**. Each PR was verified
 carefully -- by parsing route tables, comparing before/after surfaces, driving state machines
@@ -380,6 +395,100 @@ documents that were available -- two vendor PDFs, an SDK docstring, the enum's o
 settled more questions than the code did.
 
 ---
+
+## 5d. What landed on 2026-09-06, evening
+
+Four PRs, each verified on the instrument before merging rather than after.
+
+**MAST_spec#89** -- dropped the module-scope `deepspec = Deepspec()`. Nothing imported the
+name; `Deepspec` is a singleton, so it was the same object `app.py` builds. Its only effect
+was to force construction, and therefore camera binding, at import.
+
+**MAST_spec#91** -- two live bugs, both found by watching a real service start.
+
+- `FilterWheels._wheel_by_name` iterated `filter_wheels.wheels`, a module-scope name that
+  does not exist. **Every filter-wheel endpoint was dead** -- `get_status`, `get_position`
+  and `move`. Lint could not see it: the only other occurrence is inside
+  `if __name__ == "__main__":`, which is module scope, so F821 saw a legitimate binding
+  while the block never ran under import. **A `__main__` block silently satisfies the
+  linter for names used at runtime.** An AST scan for the same shape across the repo found
+  one other instance, in `cameras/qhy/qhy600-bug.py`, already excluded as a scratch file.
+- Six corrupted degree signs across five lines of `greateyes.py`: bytes `D6 B2 C2 B0`, a
+  UTF-8 degree sign decoded as cp1255 (this machine's Hebrew ANSI codepage) and re-encoded.
+  Baked into the source, not introduced by the log handler.
+
+**MAST_spec#90** -- `Spec.startup()` dispatches onto a daemon thread and returns. The long
+operations already dispatched (`cool_down`, `move`, `unpark` set an activity flag and their
+`RepeatTimer` clears it); only the serial synchronous calls around them blocked. Measured
+live: the traverse returns in 0.81 s while the Newton cools for 1 m 55 s behind it, and
+`/docs` answers in 30 ms.
+
+A second commit was needed after the first: `traverse_components_and_call` stops at the
+first component that raises, so "come up degraded" would have meant *nothing after the
+failure starts at all*. `chiller` is first in `components_dict`, so one unreachable chiller
+would have cost every camera, wheel and shutter its startup -- silently. It now takes
+`isolate_failures`, which only `startup` passes.
+
+**MAST_common#107** -- `DliPowerSwitch.get()`/`put()` opened a fresh `httpx.Client` per
+call: a new TCP connection plus a Digest 401 challenge round trip, for a single outlet read.
+150 ms per read, against 15 ms with a reused client. Each component reads the outlets several
+times over (`powered` calls `is_on()`, `operational` calls it again, `why_not_operational` a
+third time), so `/spec/status` was doing several dozen of them.
+
+Measured on the instrument, before merging:
+
+| | before | after |
+|---|---|---|
+| `/spec/status` | 11,131 ms | **~2,950 ms** |
+| `deepspec` | 3,472 ms | 2,112 ms |
+| `highspec` | 714 ms | 84 ms |
+| `chiller` | 445 ms | 45 ms |
+
+Pooling introduces one failure per-request clients cannot have -- a keep-alive the PDU closed
+while idle -- which is retried once on a fresh connection. `TimeoutException` is deliberately
+excluded: that path already waited, and retrying only doubles it.
+
+Two corrections worth keeping: an earlier reading of ~950 ms was taken with three of four
+cameras still booting and is not comparable; and `common/` is the shared clone, so #107
+reaches MAST_unit, MAST_control and MAST_gui at their next start.
+
+**The bottleneck has moved.** `deepspec` is now 2.1 s of the remaining 2.9 s, and that is
+greateyes SDK calls across four cameras, not outlet reads.
+
+## 5e. Open: camera reconnect costs ~50 s on every restart -- found 2026-09-06
+
+Four-for-four across the day's restarts: all four bands fail their first
+`ConnectToSingleCameraServer`, power-cycle, and wait 25 s to reboot.
+
+**Root cause, two halves that compound.** `GreatEyes.shutdown()` warms up, sets
+`shutdown_event` and sets `_was_shut_down` -- it never calls `DisconnectCamera` /
+`DisconnectCameraServer`. The only disconnect is in `__del__`, a finalizer. And shutdown
+never runs at all: **zero `ShuttingDown` lines in the whole day's log across four restarts**,
+because the process is terminated rather than stopped. So the camera server holds a session
+bound to a dead TCP connection. The next process's `try_connect_camera` does attempt cleanup
+first -- hence `DisconnectCamera -> False` in the log -- but the SDK's `addr` handle is
+process-local and cannot release a dead process's session.
+
+Options, in the order worth taking them:
+
+1. **Retry once before power-cycling.** Nobody has tried simply waiting a few seconds and
+   reconnecting without the reboot. Diagnostic: it reveals whether the server times out a
+   dead peer on its own, and that answer decides whether the rest is worth doing.
+2. **Poll instead of blind-sleeping 25 s.** `time.sleep(boot_delay)` at greateyes.py:299 is
+   unconditional. Retrying every ~2 s up to `boot_delay` returns as soon as the camera is
+   ready and never waits longer than today. Free.
+3. **Disconnect in `shutdown()` AND make shutdown run.** The correct fix, but it needs both
+   halves -- the disconnect alone buys nothing while shutdown never executes. It also never
+   fully solves it: a crash or power loss still strands a session, so the recovery path has
+   to survive regardless.
+4. **Camera-side session timeout.** The cameras have a web page on port 80. Vendor-dependent,
+   may not exist, but the only option that fixes it at source.
+
+**Not worth trying: parallelising the probes.** They already are -- four threads, all cycling
+within 200 ms of each other. The ~50 s is one camera's serial cost, not four queued.
+
+Also seen but not investigated: a `start_tls.failed` on the `NotificationWorker` at
+16:10:39Z.
 
 ## 6. Three bugs the lint work turned up
 
