@@ -2,8 +2,13 @@
 
 This repo holds the **project-wide** Claude/LLM configuration for the MAST team:
 shared skills (`skills/`) and shared memory (`memory/`), symlinked into `~/.claude/`
-by `setup.sh`. It is the home for guidance that applies across *all* MAST repos,
-and every MAST repo's own `CLAUDE.md` references it as that source of truth.
+by `setup.sh` / `setup.ps1`. It is the home for guidance that applies across *all*
+MAST repos, and every MAST repo's own `CLAUDE.md` references it as that source of truth.
+
+**`setup.sh` installs `skills/` and `memory/` only.** `CLAUDE.md`, `plans/` and
+`code-validation-and-ci-guidelines.md` are read when something points at them, never
+auto-loaded — so a convention that agents must *follow* belongs in the relevant repo's own
+`CLAUDE.md`, or in code that enforces it, rather than only in `plans/`.
 
 ## Where does a piece of information belong?
 
