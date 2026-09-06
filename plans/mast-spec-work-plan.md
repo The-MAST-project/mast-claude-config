@@ -6,10 +6,10 @@ claim here was checked against a `common` clone in sync with origin -- 0 behind,
 rather than inferred. Nothing was measured by running the service, because the service
 cannot be run off the telescope (§3).*
 
-**Status: current as of 2026-09-06, `master` at `7645cef`.** §2.1, §2.2, §2.3 and §2.4 are
-done. The whole HTTP surface is now on the endpoint contract, and the import blocker is
-filed as **MAST_spec#77** -- which turned out to be worse than this document described, and
-is now the item everything else waits on.
+**Status: current as of 2026-09-06, `master` at `03f362f`.** Seven of eight items are done.
+**Only §2.5 is left, and it is now the whole of the risk**: three days of change to the HTTP
+surface, the abort path and the acquisition path sit on `master` with nothing having run any
+of it. The blocker that makes that unavoidable is **MAST_spec#77**.
 
 ---
 
@@ -173,42 +173,79 @@ layer earlier and strictly worse, since it needs no service: pytest collection, 
 or an editor's language server is enough. They share the principle from
 `MAST_unit.2024-12-12#118` but not the fix, and fixing either alone leaves the other.
 
-### 2.5 Exercise the changes on the instrument
+### 2.5 Exercise the changes on the instrument -- THE ONLY ITEM LEFT
 
-**This is now the largest item, and it grew without anyone deciding it should.** Everything
-below is live on `master` and none of it can be regression-tested until §2.4 is solved.
+**Everything else on this list is done. This is where all of the accumulated risk sits.**
 
-Acquisition behaviour:
+Three days of change are on `master` and **none of it has been run**. Each PR was verified
+carefully -- by parsing route tables, comparing before/after surfaces, driving state machines
+against stubs, and reading two vendor SDK documents -- but that is verification by reading. The
+repo cannot import itself off the telescope (§3), so nothing else was available.
 
-- **MAST_spec#64** -- the fiber stage now repositions when it is *not* already at `deepspec`.
-  It previously moved only when it already was.
-- **MAST_spec#66** -- `abort()` no longer leaves the frame to be read out and saved.
-- **MAST_spec#67** -- `abort()` during a readout no longer does nothing.
+What is unverified, by area:
 
-The HTTP surface, all of it:
+**The HTTP surface** -- every route in the service changed shape.
 
-- **MAST_spec#69** -- `/mast/api/v1/spec/abort` exists, having answered 404 for months.
-- **MAST_spec#70** -- 35 routes are `PUT`-only; a caller still sending `GET` gets 405.
-- **MAST_spec#71-#76** -- every route re-registered through `common`, every response now an
-  envelope, every Swagger tag changed.
-- **MAST_spec#72** -- the chiller moved from `/specchiller/...` to `/spec/chiller/...` and
-  gained three routes.
+- `/mast/api/v1/spec/abort` exists at all (#69); it answered 404 for months.
+- 35 routes are `PUT`-only (#70). A caller still sending `GET` now gets 405 -- deliberately.
+- Every route re-registered through `common` (#71-#76): responses are now `CanonicalResponse`
+  envelopes and every Swagger tag changed.
+- The chiller moved from `/specchiller/...` to `/spec/chiller/...` and gained three routes (#72).
 
-A single `curl` per route against `mast-ns-spec` would settle most of it, and is worth doing
-before the next Deepspec run rather than after.
+**The abort path** -- rewritten on all three cameras.
 
-### 2.6 Decide what abort means during a readout
+- Aborting an exposure no longer produces a frame (#66), works at all during a readout (#67),
+  and no longer races its own readout trigger (#83).
+- Abort now discards the frame on all three cameras (#85, #86), and the QHY600 has an abort for
+  the first time (#84).
 
-`GreatEyes.abort()` now stops an exposure, not a readout -- a boundary arrived at by fixing
-two bugs, not by anyone choosing it. `ge.GetMeasurementData_DynBitDepth` is a blocking
-ctypes call already in flight, so the frame still lands on disk.
+**The acquisition path.**
 
-Two defensible answers are set out in **MAST_spec#68**. Note the constraint that decides
-between them: a cancellation flag cannot interrupt the SDK call, so the earliest realistic
-cancel point is *after* it returns and *before* the FITS is written. That buys "no file",
-not "instrument free sooner".
+- The fiber stage repositions when it is *not* already at `deepspec` (#64) -- it previously
+  moved only when it already was.
+- `Stage.__init__` raises `ValueError` on an unknown name instead of `AttributeError` one line
+  later (#78).
 
-### 2.7 Retire the `endpoint_` prefix
+A `curl` per route plus an abort issued mid-readout would settle most of it. Worth doing before
+the next Deepspec run rather than after, and worth doing as one deliberate pass rather than
+incidentally.
+
+### 2.6 Decide what abort means during a readout -- DONE 2026-09-06, MAST_spec#85, #86
+
+**The answer: abort discards the frame. No exception, no per-camera contract.**
+
+| camera | mechanism | PR |
+|---|---|---|
+| Newton | `Aborting` checked before `SaveAsFITS` -- the SDK gives no signal that an acquisition was aborted rather than completed | #85 |
+| greateyes | `Aborting` checked before the FITS is built | #85 |
+| QHY600 | `CancelQHYCCDExposingAndReadout` drops the blocking `GetQHYCCDSingleFrame` into a failure branch that already existed | #86 |
+
+`Aborting` was added to `NewtonActivities` and `GreatEyesActivities` in MAST_common#103, and to
+the module-local `QHYActivities` in #86. It means *"a frame is still to be discarded"* rather
+than *"an abort happened"* -- raised and cleared immediately when nothing is in flight -- which
+is what makes it worth waiting on.
+
+**The issue was filed on a false premise, and finding that out was most of the work.** It
+assumed the greateyes could not discard a frame, which framed the decision as "uniform contract
+vs. per-camera honesty". The vendor PDF says otherwise: `GetMeasurementData_DynBitDepth` obtains
+*"the last measurement performed"*, and after `StopMeasurement` a fetch returns
+`MeasurementStopped`. The constraint did not exist, so neither did the dilemma.
+
+What is true, and applies to all three cameras: **an abort during the readout is not the same
+case as an abort during the exposure.** The first was already handled -- clearing `Exposing`
+stops the readout ever starting (#66, #67, #83). The second is what the issue was about, and no
+SDK rescues it, because by then the measurement is complete and the data is valid.
+
+Two defects were found on the way and fixed separately:
+
+- **#83** -- both cameras made the hardware idle *before* clearing `Exposing`, so both raced
+  their own readout trigger on every abort. On the Newton, whose handler is woken by driver
+  events rather than polling, that race was the expected sequence rather than a coincidence.
+- **#84** -- `QHY600.abort()` did nothing at all. Its body was `return super().abort()`, which
+  resolves to `Component.abort`, an abstract method whose body is a docstring. The whole chain
+  from the plan client down was a no-op on that camera while every layer reported success.
+
+### 2.7 Retire the `endpoint_` prefix -- DONE 2026-09-06, MAST_spec#79
 
 14 methods remain: 4 in `spec.py`, 10 in `stage/stage.py`. (`endpoint_status` went with §2.3,
 which deleted it.)
@@ -223,22 +260,18 @@ deliver. Renaming is therefore a tidy-up with no remaining argument against it -
 touches names across ten routed methods in a repo with no tests, so it wants its own diff
 rather than riding along with something else.
 
-### 2.8 Loose ends
+### 2.8 Loose ends -- DONE 2026-09-06
 
-- The two `C901` directives read "too complex for flake8". **This repo has no flake8**; ruff
-  runs that rule. One word, whenever something else touches those lines.
-- `StageActivities.Aborting` (MAST_common#70) is used in `stage/stage.py`, but the camera
-  `abort()` methods set no aborting flag at all. Fold into §2.6.
-- The Newton `SetShutter(mode=2)` hardware question has **no issue**. It lives only in
-  MAST_spec#55's body and in the comment at `_NEWTON_HONOURS_CLOSED_SHUTTER`. The finding is
-  worth keeping findable: nine frames at a steady -9.804 C, a 10 us bias at 63899 ADU of
-  65535, and an excess over the pedestal that runs *backwards* with integration time
-  (10 us -> +63649, 5 s -> +81, 60 s -> +29). No model of "the sensor sees nothing" gives
-  that, and diagnosing it needs someone who knows the camera.
-- Confirm `resolve_object_name` (MAST_common#62, #92) genuinely is not spec's job. Zero uses
-  here; target resolution probably belongs to control, but that was not verified.
-
----
+- **The `C901` directives named flake8** (#80). This repo has none; ruff runs that rule. The
+  reason is kept and sharpened to the argument §6 of the CI guidelines makes.
+- **The Newton `SetShutter(mode=2)` finding** is now **MAST_spec#81**, with the ADU table and
+  the arithmetic that rules out the innocent reading. It had been living only in #55's body and
+  a code comment.
+- **The camera `Aborting` flag** turned out not to be a loose end at all: neither camera enum
+  had such a member, so it was a cross-repo change whose meaning depended on §2.6. It landed
+  with that decision rather than separately.
+- **`resolve_object_name`** (MAST_common#62, #92) is confirmed **not** spec's job -- it is used
+  only by `common`'s own tests, by no service at all.
 
 ## 3. The blocker, now filed as MAST_spec#77
 
@@ -319,6 +352,32 @@ The pattern from §5a held all day: each item was framed as one problem and turn
 another. "Adopt the contract in chiller" found a malformed base path. "Declare the camera
 routes" found that a bound method cannot carry the marker. "File the import blocker" found
 that the import energises hardware rather than merely blocking.
+
+---
+
+## 5c. The abort path, 2026-09-06
+
+**MAST_common#103** -- `Aborting` for the two shared camera enums. **MAST_spec#79** -- the
+`endpoint_` prefix retired. **#80** -- the `C901` directives stop naming flake8. **#83** -- both
+aborts stop racing their own readout trigger. **#85** -- abort discards the frame on the Newton
+and greateyes. **#86** -- the QHY600 gets an abort at all, and discards too. **#78** -- `Stage`
+takes a `SpecStageNames`. Issues filed: **#81** (Newton shutter mode), **#84** (closed by #86).
+
+**The pattern from §5b held to the end, and twice it was my own reasoning that was wrong.**
+
+- "Adopt the contract in chiller" found a malformed base path.
+- "Declare the camera routes" found that a bound method cannot carry the contract's marker.
+- "File the import blocker" found that the import energises hardware rather than merely blocking.
+- "Fix the abort ordering" found that the Newton's race is the expected sequence, not a
+  coincidence -- and then that the QHY600 had no abort at all.
+- **Twice a claim was made from a function's name and its position in a call sequence, and was
+  wrong.** `GetMeasurementData_DynBitDepth` was assumed to transfer from the sensor; the vendor
+  PDF, in the tree the whole time, says it obtains *"the last measurement performed"*. The
+  correction inverted which camera was the constrained one.
+
+In a repo where nothing can be executed, a plausible reading of code is not evidence. The
+documents that were available -- two vendor PDFs, an SDK docstring, the enum's own guidance --
+settled more questions than the code did.
 
 ---
 
