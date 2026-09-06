@@ -6,9 +6,10 @@ claim here was checked against a `common` clone in sync with origin -- 0 behind,
 rather than inferred. Nothing was measured by running the service, because the service
 cannot be run off the telescope (§3).*
 
-**Status: current as of 2026-09-06, `master` at `483f6f1`.** §2.1 and §2.2 are done, and
-the client half of the abort migration went with them (MAST_common#100). §2.4 -- the import
-blocker -- now unlocks more than anything else on the list, whatever its number says.
+**Status: current as of 2026-09-06, `master` at `7645cef`.** §2.1, §2.2, §2.3 and §2.4 are
+done. The whole HTTP surface is now on the endpoint contract, and the import blocker is
+filed as **MAST_spec#77** -- which turned out to be worse than this document described, and
+is now the item everything else waits on.
 
 ---
 
@@ -21,7 +22,8 @@ blocker -- now unlocks more than anything else on the list, whatever its number 
 | CI | lint only, blocking, `ubuntu-latest`, ruff pinned at 0.16.0 |
 | Branch protection | on: requires `lint`, no up-to-date requirement, 0 required reviews, admins can override |
 | Routes served | **44**: 35 PUT (state-changing), 9 GET (readers) -- §2.2 |
-| `@endpoint` declarations | **0** of 44 |
+| `@endpoint` declarations | **32**, plus 6 files using the ABC generator -- §2.3 |
+| Routes bypassing the contract | **0** |
 | Tests | none, and none possible today (§3) |
 
 The lint work is finished and enforced. What remains is **contract debt against
@@ -106,55 +108,94 @@ considered on 2026-09-06 and declined. Do not pick it up from this document with
 **Still open from this:** the handlers return bare values or `None` rather than a
 `CanonicalResponse`. That is the `enveloped()` half of MAST_spec#56 and arrives with §2.3.
 
-### 2.3 Adopt the endpoint contract
+### 2.3 Adopt the endpoint contract -- DONE 2026-09-06, MAST_spec#71-#76
 
-Zero `@endpoint(` declarations, and `common.endpoints` is not imported at all. Spec calls
-FastAPI's **native** `router.add_api_route` method, which at the call site looks almost
-identical to `common`'s enforcing free function:
+Six PRs, one per component. `router.add_api_route` no longer appears anywhere: every route
+goes through `common`'s registration, so an undeclared handler stops the process at import
+rather than shipping untiered.
 
-```python
-router.add_api_route(path, tags=[tag], endpoint=self.status)   # spec -- FastAPI's
-add_api_route(router, path, endpoint=self.status)              # common's -- enforcing
-```
+**The trade taken.** Swagger regroups: ~21 lifecycle routes leave their per-component tags
+for the flat `Component interface (contract)`, and operator verbs become
+`<Component> (operator)`. The tag is derived from the tier and there is deliberately no
+override. This was weighed against keeping the operator-facing grouping and decided in favour
+of adoption, on the same terms MAST_unit took -- with the machine-checkable half deferred
+until the import path is unblocked, since a repo that cannot run tests cannot benefit from
+guarantees a test would assert.
 
-What spec forgoes meanwhile:
+**Two shapes, not one.** `Spec`, `Deepspec`, `Highspec` and `Chiller` are `Component`s, so
+`register_component_endpoints` generates their four interface verbs from the ABC.
+`FilterWheels` and `StageController` are **not** -- they are collections whose routes take a
+`wheel` or `stage_name` -- so all their verbs are `OPERATION`, including startup / shutdown /
+abort. Declaring those `INTERFACE` would claim an ABC guarantee that does not hold.
 
-- **No import-time refusal** of a handler that has not declared itself, which is the
-  mechanism that stops the declared surface drifting from the served one -- the specific
-  failure the retired `endpoint_` prefix suffered.
-- **No `enveloped()` wrapper**, so handlers can still return a bare value, a `None`, or let
-  an exception escape rather than always answering a `CanonicalResponse`.
-- **No tier or area tags** in Swagger; spec's `tags=` are hand-written strings rather than
-  read from the declaration.
+**Highspec needed `factory=True`.** Three of its routes handle `self.camera` methods, and the
+two cameras do not share an exposure signature -- the endpoint deliberately publishes
+whichever is configured, so `/docs` describes the machine in front of you. A facade method
+would have one fixed signature and be wrong for one camera. The declaration cannot ride on the
+camera either: the contract stamps its marker on the handler, and a bound method refuses the
+attribute. A `functools.wraps`'d closure takes the marker and keeps `__wrapped__`, so
+`inspect.signature` still resolves to the camera's parameters. Binding the camera at
+registration was accepted as the decision, not a limitation -- publishing a per-camera schema
+and rebinding at runtime cannot both be true.
 
-The relevant `MAST_common` PRs are #58 (the decorator), #69 (`factory=True`), #72 (the tag
-is the tier, published as `x-stability`), #75 (`x-completion`), #99 (grouping by area) and
-**#86**, which made `tags=` advisory rather than refused *specifically so this repo could
-migrate file by file*. Its docstring names "MAST_spec has 29 such call sites". Adoption need
-not be a flag day.
+**What it found on the way**, none of which was the point:
 
-### 2.4 File the import blocker
+- **MAST_common#101** -- `add_api_route` ignores `declaration.methods` and silently serves
+  `GET`. Only `register_component_endpoints` reads the declaration. Every consumer adopting
+  the contract hits this; MAST_spec passes `methods=` twice as a workaround.
+- **A malformed base path** -- the chiller served at `/mast/api/v1/specchiller`, a missing
+  separator. Fixed in #72. Same family as §2.1: a route registered where nobody asks.
+- **A hand-rolled envelope deleted** -- `Spec.endpoint_status` was
+  `CanonicalResponse(value=self.status())`, which is exactly what `enveloped()` does.
 
-`import spec` blocks indefinitely on a bare checkout, reaching for the config database and
-the operational share. **It has no issue of its own.** The reasoning currently survives only
-in MAST_spec#63, which is closed as not-planned, and in the testing section of #68.
+### 2.4 File the import blocker -- DONE 2026-09-06, MAST_spec#77
 
-Check **MAST_spec#43** first -- "Process start moves hardware here too: lifespan calls
-`spec.startup()`, which unparks the Zaber stages and moves the filter wheels" -- which
-sounds like the same root cause seen from the other end, and may make this a comment rather
-than a new issue.
+*This section said "`import spec` blocks indefinitely, reaching for the config database and
+the operational share". That was the symptom. Walking every module's top-level AST found six
+import-time side effects, two of which command hardware.*
 
-### 2.5 Exercise the three acquisition fixes on the instrument
+**`import spec` switches on a camera's outlet.** `spec.py:49-53`, at module scope: constructing
+`SwitchedOutlet` reads the config, `.detected` probes the PDU over the network, and
+`.power_on()` energises the Highspec camera. The comment above it states the requirement
+correctly -- the camera must be on before `Newton.startup()` -- and then satisfies it as early
+as it is possible to satisfy it.
 
-All three are live on `master` and none can be regression-tested until §2.4 is solved:
+**`import` also starts camera threads.** `cameras/greateyes/greateyes.py:1316` spawns a thread
+per band at module scope, each calling `make_camera` ->
+`GreateyesFactory.get_instance(band=band)`, and the import returns before they finish.
 
-- **MAST_spec#64** -- the fiber stage now repositions when it is *not* already at
-  `deepspec`. It previously moved only when it already was.
+Also at import: `deepspec = Deepspec()`, `spec = Spec()` in `app.py`, a ctypes call into the
+greateyes DLL, and `ctypes.CDLL(...)` for QHY.
+
+**Filed separately from #43, deliberately.** #43 is that starting the *service* commands
+hardware (`lifespan` calls `spec.startup()`). This is that *importing a module* does -- one
+layer earlier and strictly worse, since it needs no service: pytest collection, a docs build,
+or an editor's language server is enough. They share the principle from
+`MAST_unit.2024-12-12#118` but not the fix, and fixing either alone leaves the other.
+
+### 2.5 Exercise the changes on the instrument
+
+**This is now the largest item, and it grew without anyone deciding it should.** Everything
+below is live on `master` and none of it can be regression-tested until §2.4 is solved.
+
+Acquisition behaviour:
+
+- **MAST_spec#64** -- the fiber stage now repositions when it is *not* already at `deepspec`.
+  It previously moved only when it already was.
 - **MAST_spec#66** -- `abort()` no longer leaves the frame to be read out and saved.
 - **MAST_spec#67** -- `abort()` during a readout no longer does nothing.
 
-The first changes *when* the stage moves; the other two change *whether a frame is
-produced*. Worth a deliberate pass before the next Deepspec run.
+The HTTP surface, all of it:
+
+- **MAST_spec#69** -- `/mast/api/v1/spec/abort` exists, having answered 404 for months.
+- **MAST_spec#70** -- 35 routes are `PUT`-only; a caller still sending `GET` gets 405.
+- **MAST_spec#71-#76** -- every route re-registered through `common`, every response now an
+  envelope, every Swagger tag changed.
+- **MAST_spec#72** -- the chiller moved from `/specchiller/...` to `/spec/chiller/...` and
+  gained three routes.
+
+A single `curl` per route against `mast-ns-spec` would settle most of it, and is worth doing
+before the next Deepspec run rather than after.
 
 ### 2.6 Decide what abort means during a readout
 
@@ -169,10 +210,18 @@ not "instrument free sooner".
 
 ### 2.7 Retire the `endpoint_` prefix
 
-15 methods remain: 5 in `spec.py`, 10 in `stage/stage.py`. The convention was ratified for
-retirement on 2026-08-10, after measurement on MAST_unit found it wrong in both directions
--- 26 routed operations sat on unprefixed methods, and ten `endpoint_`-named methods were
-routed by nothing at all. Falls out of §2.3 naturally.
+14 methods remain: 4 in `spec.py`, 10 in `stage/stage.py`. (`endpoint_status` went with §2.3,
+which deleted it.)
+
+The convention was ratified for retirement on 2026-08-10, after measurement on MAST_unit found
+it wrong in both directions -- 26 routed operations sat on unprefixed methods, and ten
+`endpoint_`-named methods were routed by nothing at all.
+
+**§2.3 has now made it redundant rather than merely disliked.** A `@endpoint(` grep returns
+this repo's surface exactly, which is the property the prefix was chosen for and did not
+deliver. Renaming is therefore a tidy-up with no remaining argument against it -- but it
+touches names across ten routed methods in a repo with no tests, so it wants its own diff
+rather than riding along with something else.
 
 ### 2.8 Loose ends
 
@@ -191,20 +240,28 @@ routed by nothing at all. Falls out of §2.3 naturally.
 
 ---
 
-## 3. One blocker, three consequences
+## 3. The blocker, now filed as MAST_spec#77
 
-`import spec` reaching for the config database and the operational share is why:
+`import spec` reads the config database, probes a PDU, **switches on a camera's outlet** and
+starts threads that connect to cameras -- before any function is called (§2.4).
 
-1. the CI added in MAST_spec#57 is **lint only** -- a test job would hang the build, or pass
-   having proved nothing (§3.2 of `code-validation-and-ci-guidelines.md`);
+That is why:
+
+1. the CI added in MAST_spec#57 is **lint only** -- a test job would hang on the config read,
+   or on a runner with network access attempt a PDU call;
 2. §2.5 has to happen **on the telescope**, with no suite to catch a regression afterwards;
 3. §2.6 cannot be **validated** once decided.
 
-It is the highest-leverage item here and the only one that unlocks others. `MAST_unit`'s
-workflow is the template for the test job that becomes possible afterwards -- two checkouts
-side by side, with `PYTHONPATH: ${{ github.workspace }}` standing in for `mast.pth`.
+**The cost is larger than it was when this document was written.** Everything merged on
+2026-09-05 and 2026-09-06 -- the fiber-stage guard, both abort fixes, the missing
+`/spec/abort`, the verb sweep, and all six endpoint-contract PRs -- was verified by parsing
+source or by exercising stub objects. **Nothing in three days was verified by running this
+service.** The bugs that were found were found by reading registrations, which is also why two
+routes registered where nobody asks (#69, #72) survived for months.
 
----
+`MAST_unit`'s workflow is the template for the test job that becomes possible afterwards --
+two checkouts side by side, with `PYTHONPATH: ${{ github.workspace }}` standing in for
+`mast.pth`.
 
 ## 4. Verified as already done
 
@@ -249,6 +306,19 @@ measurement missed multi-line registrations; and MAST_common#51's step 2 instruc
 to bump a submodule gitlink that has not existed since MAST_unit#94. That last one is now
 the **third** document found carrying the stale submodule claim, after this repo's CI
 guidelines and its docs-site plan -- both corrected in #12.
+
+---
+
+## 5b. What landed later on 2026-09-06
+
+**MAST_spec#71-#76** -- the endpoint contract, one PR per component, ending with the
+`factory=True` treatment for Highspec's camera routes. **MAST_spec#77** -- the import blocker,
+filed. **MAST_common#101** -- filed, the `declaration.methods` trap.
+
+The pattern from §5a held all day: each item was framed as one problem and turned out to be
+another. "Adopt the contract in chiller" found a malformed base path. "Declare the camera
+routes" found that a bound method cannot carry the marker. "File the import blocker" found
+that the import energises hardware rather than merely blocking.
 
 ---
 
