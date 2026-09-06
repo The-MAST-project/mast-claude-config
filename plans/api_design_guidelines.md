@@ -46,9 +46,7 @@ with a public router carved out for `/health` and documentation endpoints.
 **Proxy transparency.** Endpoints must behave identically whether addressed directly or through
 the nginx reverse proxy.
 
-*Tracking (unit):* uniform verbs are the CONTRACT tier of #42, with the names promoted to a shared
-cross-repo enum in
-[#35 Endpoint names are stringly-typed across unit↔control](https://github.com/The-MAST-project/MAST_unit.2024-12-12/issues/35).
+*Tracking (unit):* uniform verbs are the CONTRACT tier of #42.
 The CanonicalResponse envelope is invariant 4 of #42, remediated in
 [#47 Uniform response envelope remediation](https://github.com/The-MAST-project/MAST_unit.2024-12-12/issues/47)
 (PR stack #68 → #69 → #70, plus #73 and #74); it is not yet uniform on the unit, which is what
@@ -68,7 +66,7 @@ parked. Enforcement of all of the above lives in
    Dispatch is via `asyncio.to_thread` rather than a bare `threading.Thread`: the awaitable it
    returns captures the function's exception instead of losing it to stderr, and gives the host
    a single registry of what is in flight.
-4. Endpoints — whether immediate or long-duration — return `CanonicalResponse_ok`, in the
+4. Endpoints — whether immediate or long-duration — return `CanonicalResponse_Ok`, in the
    long-duration case after initiating the thread.
 5. Endpoints depending on external services return canonical errors as soon as they detect that
    the service is unreachable or unresponsive.
@@ -88,7 +86,7 @@ parked. Enforcement of all of the above lives in
    ([#41 Endpoint naming](https://github.com/The-MAST-project/MAST_unit.2024-12-12/issues/41)'s
    `acquire_images`, #34's extracted spiral method) land against a stated rule, with a static
    check in #52.
-4. Long-duration endpoints returning `CanonicalResponse_ok` after starting the thread — already
+4. Long-duration endpoints returning `CanonicalResponse_Ok` after starting the thread — already
    the target contract in
    [#43 Uniform completion-detection contract](https://github.com/The-MAST-project/MAST_unit.2024-12-12/issues/43)
    (invariant 3), item 1: fire-and-flag. See also open question 2 below.
@@ -173,15 +171,9 @@ therefore fast, uniformly available, and cannot itself fail partway through a re
 
 *Tracking (unit):* the whole of §5 is
 [#80 Abort holds an Aborting activity until the device is confirmed at rest](https://github.com/The-MAST-project/MAST_unit.2024-12-12/issues/80),
-a sibling of invariant 3 under #42. The unit currently does the opposite of §5.2: every component
-ends the operation's activity at the moment the stop is issued (`mount.py`, `stage.py`,
-`focuser.py`), so `/status` reports idle while the device decelerates; `Aborting` exists in no unit
-component enum except a never-set `StageActivities.Aborting` (which is why the dead-flag lint,
-[#44 Static check: activity-flag start/end balance](https://github.com/The-MAST-project/MAST_unit.2024-12-12/issues/44),
-should flag it); and `Unit.abort()` busy-waits on autofocus with no bound, the failure §5.2's last
-paragraph forbids. The at-rest predicates §5.2 names all already exist, and `common/stopping.py`
-holds an unused `StoppingMonitor` that is exactly the confirmed-at-rest sampler — so this is wiring
-rather than new machinery.
+a sibling of invariant 3 under #42. `Aborting` is carried by `MountActivities`,
+`FocuserActivities`, `CoverActivities` and `StageActivities`, and `common/stopping.py`'s
+`StoppingMonitor` is the confirmed-at-rest sampler.
 
 §5.1's second paragraph is now **invariant 7** of #42 in its own right. It is the precondition that
 makes stop-in-place abort sound: #80 is not correct without it, so the two are tracked together and
@@ -267,7 +259,7 @@ flag at its next checkpoint and unwinding.
 
 | This document | Unit issue |
 |---|---|
-| §2 uniform verbs per host | #42 CONTRACT tier, #35 (shared name enum) |
+| §2 uniform verbs per host | #42 CONTRACT tier |
 | §2 CanonicalResponse envelope | #42 invariant 4 → #47 (#68/#69/#70, #73, #74) |
 | §2 global authentication | #45 (parked) |
 | §3 g1 rejection checks in the endpoint | #42 invariant 4 → #47; thin handler #34 (invariant 6) |
@@ -278,7 +270,7 @@ flag at its next checkpoint and unwinding.
 | §3 g5 prompt error on a dead dependency | #42 **invariant 8**; enforced in #52; #15 is an instance |
 | §4 HTTP return codes | open for deliberation; audit input on #42 |
 | §5.1 no inherited resting position | #42 **invariant 7** |
-| §5.2 / §5.3 abort mechanism | #80; dead `Aborting` flag in #44; bounded waits share #43's helper |
+| §5.2 / §5.3 abort mechanism | #80; bounded waits share #43's helper |
 | §6 Q1 / Q3 | open — see §4 |
 | §6 Q2 | answered by #43 |
 | §6 Q4 | parked under #42 future directions |
