@@ -251,6 +251,14 @@ if the camera is reconfigured or replaced. Count pixels at or above that level r
 trusting a single one: the field is black, so one hot pixel or a cosmic ray would otherwise
 make every frame look saturated.
 
+> **Corrected 2026-09-08, and this paragraph is why it went unnoticed.** Deriving the level
+> from the bit depth gives 1023, and **the CS165MU rails one count below that**. Run
+> `0006`'s frames max at exactly 1022, with none at 1023 (§18.2), so
+> `saturated_pixels(frame, 1023)` returns zero on a frame whose core is fully clipped — and
+> **`argmax_saturated` below has never been able to be true**. The reasoning above is sound
+> and its conclusion is wrong: self-adjusting was the right instinct, but the sensor does
+> not reach the value the arithmetic predicts. See §18.4.
+
 What saturation does to the answer, so that the report can be read properly: coupling rises
 toward the optimum, so saturation appears **near the peak** — precisely where it does the
 most damage. A saturated peak is a plateau rather than a maximum, so the argmax becomes
@@ -967,3 +975,186 @@ morning after.
   it turns out to be wanted.
 - **Cross-run correlation** — two full `(date, seq, step)` triples — is explicitly out of
   scope per the same-sequence decision, but the parameterisation stays open to it.
+
+---
+
+## 18. Aperture photometry — replacing the plain-sum flux
+
+### 18.1 Why
+
+§5 measures a frame with `frame_flux`: a plain sum of every pixel above a commanded
+pedestal. Its own justification is that the ThorCam sees only the fibre output against
+black, so there is no neighbour to exclude and no aperture to choose.
+
+The change was proposed for **consistency** — MAST already has aperture photometry written
+for this exact measurement. `unit/src/flux_metering/aperture_photometry_single.py` (1697
+lines, from `MAST_fiberhead_testing`) targets "a single fiber output in a 1440x1080 image",
+which is the CS165MU's own geometry. It had been dropped into the package, untracked and
+imported by nothing.
+
+**Measuring it turned a tidy-up into a correctness fix.** §18.2 is the evidence.
+
+### 18.2 What run 0006 showed
+
+All 23 steps of `Z:\MAST\mast02\2026-09-02\FluxMetering\0006`, measured 2026-09-08:
+`measure_single_image` over each step's recorded `flux_frame`, against the plain-sum flux in
+that run's own `result.json`.
+
+```
+idx     cell  ring   plain sum     bkg   aperture
+  0   (0, 0)     0     -626548   2.518      28374   <- aperture peak
+  1   (1, 0)     1     -623785   2.522      24521
+  2  (1, -1)     1     -625507   2.525      16580
+  3  (0, -1)     1     -622139   2.545      14813
+  4 (-1, -1)     1     -608317   2.554      14143
+  5  (-1, 0)     1     -603693   2.557      13246
+  6  (-1, 1)     1     -584231   2.564      21407
+  7   (0, 1)     1     -594899   2.561      15662
+  8   (1, 1)     1     -589099   2.566      12766
+  9   (2, 1)     2     -581747   2.568      17109
+ 10   (2, 0)     2     -584001   2.569      12745
+ 11  (2, -1)     2     -576040   2.576       9332
+ 12  (2, -2)     2     -572202   2.579       8736
+ 13  (1, -2)     2     -564128   2.585       7198
+ 14  (0, -2)     2     -556368   2.590       7399
+ 15 (-1, -2)     2     -554338   2.591       6834
+ 16 (-2, -2)     2     -554018   2.592       5753   <- aperture MINIMUM, plain sum near max
+ 17 (-2, -1)     2     -552445   2.593       6552
+ 18  (-2, 0)     2     -558774   2.587       8149
+ 19  (-2, 1)     2     -541818   2.596      11827
+ 20  (-2, 2)     2     -541980   2.596      11323
+ 21  (-1, 2)     2     -540741   2.596      12736   <- plain-sum "peak" (the last full step)
+ 22   (0, 2)     2     -556004   2.594       1338   <- detection failed; hot pixel, not fibre
+```
+
+**The curves are near mirror images and disagree on the arg-max** — the only output a run
+acts on. Plain sum: idx 21, cell (-1, 2). Aperture: idx 0, cell **(0, 0)**.
+
+**The plain sum is tracking the background.** Its shape follows the `bkg` column exactly:
+2.518 → 2.596 counts/px, rising monotonically. Across 1,555,200 pixels that is **+117,840
+counts of sky against a total plain-sum range of +85,807** — the drift is larger than the
+whole signal being reported. The "peak" at idx 21 is simply the last step before the run
+aborted.
+
+The frames are stamped 02:11 UTC, which is **05:11 local at Neot Smadar in September**. The
+sky was brightening. The plain sum was not malfunctioning: it was faithfully integrating
+dawn across 1.5 million pixels, which is what a whole-frame sum does when the field is not
+as black as §5 assumes.
+
+**The disagreement is worst where it matters.** At idx 16-17 — cells (-2,-2) and (-2,-1) —
+the plain sum sits near its maximum while the aperture is at its **minimum**. Those are
+diagonally opposite corners of ring 2, so a search driven by the plain sum walks *away* from
+the fibre.
+
+**The corollary, which is the uncomfortable part: every flux-metering run recorded so far
+has an arg-max that may be an artefact of background drift.** The `result.json` files on the
+share are not merely imprecise; their conclusions are suspect. Any of them used as evidence
+for a fibre position should be re-measured first.
+
+The drift could not have been seen before. The current code emits one number per frame and
+no background estimate at all — `bkg_level` is what made it visible.
+
+Two further results from the same run:
+
+- **Per-frame detection is stable**: x = 798.1-798.3, y = 435.8-436.0 on every frame
+  (±0.2 px), FWHM 12.4-13.3 px. Detecting per frame costs nothing in consistency.
+- **The detection-failure case is real, at 1 frame in 23.** Step 22: segmentation found
+  nothing and the script's own smoothed-peak fallback locked onto a **hot pixel** at
+  (943, 162) — FWHM 1.1 px, one pixel at 1022 — reporting 1338 counts that are not the
+  fibre.
+
+### 18.3 Design
+
+**Use the algorithm, do not fork it.** Track `aperture_photometry_single.py` as it stands
+and import from it. Trimming it to "just the measuring part" would defeat the reason for the
+change. Its CLI, plotting and pandas paths cost nothing at import — `matplotlib` and
+`pandas` are both lazily imported inside the functions that need them, and production never
+calls the pandas one. `tifffile` and `scipy` **are** module-level and are present only
+transitively via `scikit-image`; they need explicit pins in `unit/requirements.txt`.
+
+`measure_single_image(data, ...)` is array-native and takes the 2-D `uint16` frame
+`ThorCam.expose()` already returns. It gives back `net_counts`, `counts_err`, `snr`,
+`n_saturated`, `x`, `y`, `fwhm_pix`, `radius_pix`, `bkg_level`, `bkg_std`, `area`. Today's
+`frame_flux` returns one float; the rest is what a plain sum never had.
+
+`DEFAULT_RADIUS = 36` px comes from a curve of growth on real fibrehead frames — flat from
+well inside it to past it, so the flux is insensitive to sub-pixel placement.
+
+**The one addition the script does not have: a fallback for frames with no source.**
+`measure_single_image` raises when nothing is detected, and on a spiral that is not an edge
+case — most of a walk is far from the peak, where the fibre is dark. The measurement must
+never raise, and a failure must not read as zero-by-accident:
+
+- On detection failure, **re-measure at the last successful position**, same aperture and
+  radius, so the curve stays continuous and every step is compared through the same window.
+  Record that the position was inherited.
+- With no successful position yet, record the failure and a `None` flux — distinct from a
+  measured zero.
+
+This fallback must take precedence over the script's internal smoothed-peak search, which
+has no way to tell a hot pixel from a faint fibre. Step 22 is the demonstration.
+
+### 18.4 Saturation
+
+Corrects §5.4. `measure_counts` counts pixels `>= SATURATION_ADU` (1022, from observed rails
+on this sensor family) **inside the aperture**. Three consequences to take deliberately:
+
+1. **The threshold stops being derived.** 1022 is an observed constant where
+   `(1 << bit_depth) - 1` is a prediction the sensor does not meet. Adopt it — but **record
+   the threshold used** in `result.json` and in the frame's `SATURATE` card, so a future
+   camera with a different rail shows up as a changed number rather than as silence.
+2. **The count becomes aperture-scoped**, which changes what `SATURATED_PIXELS_ALLOWED = 5`
+   means. Its justification was the whole-frame case — "one hot pixel would otherwise mark
+   every frame". Inside a 36 px aperture on the fibre that is much weaker: a clipped core
+   shows tens of pixels, a stray hot pixel shows one. Re-derive it rather than carry it
+   across.
+3. **Keep a whole-frame count as a diagnostic.** It is one `np.count_nonzero`, and it is
+   what reveals saturation *elsewhere* in the frame — how step 22's hot pixel would have
+   announced itself.
+
+### 18.5 The pedestal changes meaning
+
+`flux_black_level = 3` is currently both a camera setting and the number software subtracts.
+It becomes **only a camera setting**: the aperture measures its own background from the
+data, and better — the script keeps the clipped mean (2.73 on its samples) precisely because
+rounding to the integer 3 "drains the curve of growth by several percent". Run `0006` shows
+the same thing at 2.63.
+
+So `_flux_cards`' comment `"black level subtracted by frame_flux"` becomes false. `BLKLEVEL`
+stays — it is still what the camera was told — but it describes the sensor, not the
+reduction.
+
+### 18.6 Cost
+
+**~1500 ms per frame** on these 1440x1080 frames. At `number_of_frames = 3` and ~47 steps
+that is ~143 frames, so **~3.6 minutes on a 20-40 minute run**. That is the price of
+per-frame detection. Log the per-frame time once per run so it stays visible.
+
+### 18.7 Verification
+
+- **Repeat the 0006 comparison on runs `0001`-`0005`** before merging, to establish whether
+  the disagreement is the rule or one dawn-affected run.
+- Synthetic-frame tests: a Gaussian of known total counts is recovered; a frame with no
+  source does not raise and reports the inherited position; no source and no prior position
+  reports failure rather than zero; a hot pixel far from the source does not enter the
+  measurement (it does today); two frames with the source in different places give different
+  `aperture_x`.
+- **`test_a_clipped_core_is_reported`** — peaks at 1022 report saturation. It fails against
+  today's code, which is the point.
+- **`SimulatedFluxMeter` blocks everything until fixed**: `DEFAULT_RADIUS = 36` px is larger
+  than half its 64x64 frame, so the aperture falls off the edge, and every existing
+  flux-metering test uses it.
+
+### 18.8 Sequencing
+
+1. Track the file; pin `scipy` and `tifffile`. No behaviour change.
+2. Fix the simulator geometry so the existing suite can run.
+3. `frame_flux` → aperture, with the fallback; unit tests.
+4. Session and model fields; the `BLKLEVEL` comment.
+5. Re-measure `0001`-`0006` offline and compare arg-max before merging.
+
+### 18.9 Out of scope
+
+The annulus background, `--k-fwhm` scaling, plotting, and the pandas batch path.
+`measure_fwhm` stays a diagnostic: the radius is fixed precisely so the flux does not depend
+on a measured width.
