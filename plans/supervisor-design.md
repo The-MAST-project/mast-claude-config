@@ -524,19 +524,31 @@ appears in the interactive session within 30 s; `sc stop` → it goes, with no o
 it reappears in the new session; kill PWI4 by hand → back within ~15 s and the GUI says so;
 reboot → everything comes up with no keystroke.
 
-## 12. Prerequisites — both blocking
+## 12. Prerequisites
 
-**Autologon does not exist.** I checked mast00: `AutoAdminLogon` is unset, no `DefaultUserName`,
-no `DefaultPassword`; the current `mast` console session was logged on by hand at 10:21. The
-entire design assumes an interactive session on every unit — **without it the supervisor never
-starts and the machine is worse off than today.** Who owns configuring it (presumably
-MAST_provisioning, which is a sparse checkout here) is unresolved. Recommend Sysinternals
-`Autologon.exe`, which stores the password as an LSA secret rather than plaintext in
-`HKLM\…\Winlogon\DefaultPassword`. Screen lock and screensaver must also be disabled by policy,
-or the GUI exists where nobody can see it.
+**An interactive session on every machine that runs a supervisor.** The design assumes one:
+without it `WTSQueryUserToken` has nothing to return, the supervisor never starts, and the
+machine is worse off than today. Where the fleet stands is only partly known from here.
 
-**The PHD2 `_connected` fix** (§9.3), promoted from follow-up to prerequisite by the decision
-that a PHD2 restart must not restart the app.
+- **mast00 has no autologon** — verified: `AutoAdminLogon` unset, no `DefaultUserName`, no
+  `DefaultPassword`, and the live `mast` console session was logged on by hand.
+- **That is not evidence about the fleet.** mast00 and mastw are relics that predate
+  MAST_provisioning — the same reason mast00's PDU sits at `10.23.1.75` on the units' own VLAN
+  while every provisioned unit's is on `10.23.2.x`. They are scheduled to get autologon, but on
+  no particular date.
+- **Whether provisioned units already have it is unverified.** MAST_provisioning is a sparse
+  checkout on the machine this was written on (top-level files plus `tools/`), so
+  `server/providers/mast/provide-mast.ps1` — the script that configures a deployed unit — could
+  not be read. **Someone with a full checkout should answer this before stage 4**, because it
+  decides whether autologon is a fleet-wide provisioning change or a two-machine catch-up.
+
+Whoever configures it: recommend Sysinternals `Autologon.exe`, which stores the password as an
+LSA secret rather than as plaintext in `HKLM\…\Winlogon\DefaultPassword`. Screen lock and
+screensaver must also be disabled by policy, or the GUI exists where nobody can see it.
+
+**The PHD2 `_connected` fix** (§9.3) — blocking, and unambiguously so. Promoted from follow-up
+to prerequisite by the decision that a PHD2 restart must not restart the app: until it lands, a
+restarted PHD2 leaves the unit silently claiming a healthy guider.
 
 ## 13. Changing `opmode` while running
 
