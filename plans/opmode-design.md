@@ -6,8 +6,8 @@
 > the (not yet built) MAST supervisor. Spans MAST_common, MAST_unit, MAST_spec and
 > MAST_control, which is why it belongs in `mast-claude-config/plans/` rather than one repo.
 >
-> **Status: plan only — not implemented.** Code baseline: MAST_common `master` @ `02e5a42`,
-> MAST_unit `main` as of 2026-09-16.
+> **Status: plan only — not implemented; all design questions closed (rev. 2026-09-16).**
+> Code baseline: MAST_common `master` @ `02e5a42`, MAST_unit `main` as of 2026-09-16.
 
 ## Context
 
@@ -306,11 +306,17 @@ configured `controlled`.**
    `automatic` behaviour too, deliberately, and lands while the fleet is still `automatic` so
    any regression surfaces under the mode in production.
 
-4. **Unbounded `powerdown` waits.** `Unit.powerdown` (:289-298) spins
-   `while self.is_shutting_down` with no deadline **on the request thread**; same in
-   `mount.py:302-308`, `focuser.py:130-135`, `imagers/__init__.py:145-150`.
-   `covers.powerdown` (:351-359) already does it right with `MOVE_TIMEOUT_SECONDS` — copy that
-   shape into the other three, and run `Unit.powerdown` on its own thread.
+4. **`powerdown` blocks the request thread.** `Unit.powerdown` (:289-298) spins
+   `while self.is_shutting_down` with no deadline, *on the thread serving the HTTP request*,
+   so the caller hangs and a uvicorn worker is held. Same shape in `mount.py:302-308`,
+   `focuser.py:130-135`, `imagers/__init__.py:145-150`.
+
+   **The fix is the thread, not a deadline.** Run `Unit.powerdown` on a
+   `unit-powerdown-thread` as `startup`/`shutdown` already do, return immediately, and let the
+   caller watch `PoweringDown` clear. Waiting indefinitely is then internal and harmless, and
+   consistent with §11's decision that timeouts belong to the supervisor rather than to the
+   unit. `covers.powerdown` (:351-359) keeps its `MOVE_TIMEOUT_SECONDS` — it is already
+   written that way and there is no reason to unpick it.
 
 ## 6. Config, wire, and the `powerdown` endpoint
 
@@ -446,43 +452,75 @@ of `endpoint_powerdown` is forgotten; `test_activity_flag_balance.py` demands a 
   teardown works; it cannot exercise `/mount/startup` or any other hardware verb, because no
   `Unit` exists. Testing those still means fakes under pytest.
 
-## 11. Open questions
+## 11. Decisions taken
 
-1. **`MAST_OPMODE` vs the `MAST_PROJECT` decision** (common/DECISIONS.md:366-400, which
-   deliberately removed an env var carrying deployment shape in favour of a TOML field).
-   `tested` is a process-lifetime setting like `MAST_LOG_LEVEL` and is unarguable; `controlled`
-   via env *is* deployment shape. Recommend accepting all three — a bench override needing no
-   DB write is worth a lot — but write the reasoning into `DECISIONS.md` now.
-2. **Startup timeout.** `ontimer` clears the unit's `StartingUp` only when no component still
-   claims it; a wedged component hangs it indefinitely. `state` no longer depends on that flag,
-   so the supervisor is not stuck — but `operational` may never settle and the unit sits
-   `running` and unusable. Is a startup deadline wanted, and does it force the flag clear or
-   just add a reason to `why_not_operational`? (The latter fits the §4 split better.)
-3. **Does `powerdown` change `state`?** With `standing-down` gone, a powered-down unit still
-   reports `standing-by` while its component outlets are off — accurate (it awaits a `startup`)
-   but it hides a real difference. `PowerStatus.powered` already carries it. Recommend leaving
-   `state` alone and letting the supervisor read `powered`; flagged because it is the one place
-   the two-state model gives up information.
-4. **Does `tested` mode need a self-timeout?** As specified, a `tested` process runs until
-   someone calls `quit`. A CI job that crashes before quitting leaves it running until the
-   runner is torn down. A `MAST_TESTED_MAX_SECONDS` watchdog would cap that; recommend leaving
-   it out unless CI shows it is needed.
-5. **How long may `end_lifespan` block** before teardown? Changes process-exit timing under nssm.
-5. **`unit-timer-thread` now lives from `__init__` to process exit**, including through
-   a post-shutdown `standing-by`, where it polls PWI4 autofocus status (:584-645). Cheap —
+All five questions this plan opened have been answered. Recorded here rather than deleted,
+because the reasoning is the part that is expensive to reconstruct.
+
+**`MAST_OPMODE` may carry all three values.** The `MAST_PROJECT` removal
+(common/DECISIONS.md:366-400) looked like a precedent against env vars carrying deployment
+shape. It is not: that variable was correcting a *mixup* — for a while `MAST_PROJECT` held the
+machine role, which is not what its name meant — and the fix was to move the role into a TOML
+field, not to forbid environment variables. So there is no standing decision to argue with, and
+`MAST_OPMODE=controlled` on a bench machine is legitimate.
+
+Note in passing: `MAST_PROJECT` is gone from the code in MAST_common and MAST_unit (no reader,
+no setter; `common/tests/test_local_config.py:75` deliberately sets it to prove it is inert),
+but it is **still set machine-wide** on mast00 — `MAST_PROJECT=unit` in the registry, left by
+provisioning. Harmless, unread, and it returns on the next provision run until
+MAST_provisioning stops setting it.
+
+**No startup deadline.** A component that wedges leaves `StartingUp` set and the unit sits
+`running` and never `operational`. The unit does not impose its own timeout — the supervisor
+does, because it is the party that knows how long it is willing to wait and what to do next
+(`shutdown` and retry, or take the unit out of the pool). This keeps the unit's job to
+reporting truthfully rather than guessing.
+
+**`powerdown` does not change `state`.** A powered-down unit reports `standing-by`, which is
+accurate — it awaits a `startup`. `PowerStatus.powered` already carries the difference, and the
+supervisor reads both fields. The state enum stays at three values.
+
+**No `tested` watchdog.** A `tested` process runs until `quit`. A CI job that dies before
+quitting leaves it running until the runner is torn down, which on a GitHub runner is
+automatic. Revisit only if a self-hosted runner shows it is needed.
+
+**`end_lifespan` waits indefinitely** for `ShuttingDown` to clear before teardown. Same
+principle as the startup deadline: the unit does not cut its own shutdown short, and nssm's
+kill timeout is the backstop that already exists. This is why §5.4's fix is the *thread*, not
+a deadline — an unbounded wait is fine once it is not holding an HTTP request open.
+
+## 12. Still to check
+
+Not decisions — work that could not be done from the machine this was written on.
+
+1. **`unit-timer-thread` now lives from `__init__` to process exit**, including through a
+   post-shutdown `standing-by`, where it polls PWI4 autofocus status (:584-645). Cheap, but
    confirm it is acceptable with the mount parked and powered off.
-6. **Cross-repo greps not possible from here:** MAST_spec / MAST_control / MAST_gui for
-   `OperatingMode` and `MAST_DEBUG` before deleting; and for any status model setting
-   `extra="forbid"` before adding the two fields.
+2. **Cross-repo greps:** MAST_spec / MAST_control / MAST_gui for `OperatingMode`,
+   `production_mode`, `debug_mode` and `MAST_DEBUG` before the deletion in stage 1; and for any
+   status model setting `extra="forbid"` before adding the two status fields.
+3. **MAST_provisioning** — stop setting `MAST_PROJECT` machine-wide, and clear the existing
+   value on the fleet. Unrelated to this plan's behaviour; noted because it is the last live
+   trace of the variable.
 
 ## Provenance
 
-Written 2026-09-16 against MAST_common `master` @ `02e5a42` and the MAST_unit clone beside
-it. Requirement stated by Arie in session, including the
-`standing-by` / `running` / `tested` vocabulary and the rule that health stays in
-`operational` / `why_not_operational`. Four design decisions ratified in the same session:
-mount energised in standby; `tested` rejected in the DB; `powerdown` covers components only;
-`shutdown` aborts in-flight work. A later revision in the same session dropped a fourth state,
-`standing-down`, in favour of returning to `standing-by` after a `shutdown`. The `opmode`,
-`standby` and `standdown` identifiers were verified to have zero occurrences in either repo
-before being chosen.
+Written 2026-09-16 against MAST_common `master` @ `02e5a42` and the MAST_unit clone beside it.
+
+Requirement stated by Arie in session, including the `standing-by` / `running` / `tested`
+vocabulary and the rule that health stays in `operational` / `why_not_operational`. Nine
+decisions were ratified in the same session, in three rounds: first the four in §3-§6 (mount
+energised in standby; `tested` rejected in the DB; `powerdown` covers components only;
+`shutdown` aborts in-flight work); then the `tested` mode's live `status`/`quit` surface and the
+dropping of a fourth state, `standing-down`, in favour of returning to `standing-by`; then the
+five in §11, which closed every question the first draft left open.
+
+The bias in that last round is worth naming, because it should guide the implementation: on
+three of five — the startup deadline, the `tested` watchdog, the `end_lifespan` bound — the
+answer was *do not add a timeout*. Timeouts belong to the supervisor, which knows what it is
+willing to wait for; the unit's job is to report truthfully and not to guess on its owner's
+behalf. Where a wait is genuinely a problem, the fix is to move it off the request thread
+(§5.4), not to cap it.
+
+The `opmode`, `standby` and `standdown` identifiers were verified to have zero occurrences in
+either repo before being chosen.
