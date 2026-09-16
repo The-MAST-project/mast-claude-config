@@ -1,7 +1,7 @@
 # MAST operating modes — `opmode`
 
 > How a unit or spec machine reaches its operational state, selected by a new `opmode`
-> field with three values: `automatic`, `controlled`, `tested`; and a reported `state` of
+> field with three values: `automatic`, `controlled`, `tested`; and a reported `opstate` of
 > `standing-by` / `running` / `tested`. Consumed by the units, the spec, and
 > the (not yet built) MAST supervisor. Spans MAST_common, MAST_unit, MAST_spec and
 > MAST_control, which is why it belongs in `mast-claude-config/plans/` rather than one repo.
@@ -32,7 +32,7 @@ is binary `debug`/`production` off a `MAST_DEBUG` env var, has **zero call sites
 so it returns `False` unconditionally. The name is occupied by code that has never run.
 
 **The outcome:** one `opmode` value, resolved from one place, deciding how far a machine takes
-itself on boot — and a reported `state` of `standing-by` / `running` / `tested` that a
+itself on boot — and a reported `opstate` of `standing-by` / `running` / `tested` that a
 supervisor, or a test, can poll. Health is not part of it: that stays in the existing
 `operational` and `why_not_operational` fields.
 
@@ -61,7 +61,7 @@ class OpMode(StrEnum):
     CONTROLLED = "controlled"
     TESTED     = "tested"
 
-class MachineState(StrEnum):
+class OpState(StrEnum):
     STANDING_BY = "standing-by"; RUNNING = "running"; TESTED = "tested"
 
 OPMODE_ENV = "MAST_OPMODE"
@@ -134,7 +134,7 @@ outlet and connect ([mount.py:176-187](../../unit/src/mount.py#L176),
 | camera | [ascom.py:581](../../unit/src/imagers/ascom.py#L581) / [zwo.py:214](../../unit/src/zwo.py#L214) — cooler |
 
 So `standby()` is nearly a no-op: call the existing `Unit.connect()`
-([unit.py:337-342](../../unit/src/unit.py#L337)), set the state, log. **The mount's
+([unit.py:337-342](../../unit/src/unit.py#L337)), set the opstate, log. **The mount's
 axes are energised in standby** — *decided*; `connect()`'s mount setter runs
 `mount_enable(0)`/`mount_enable(1)` ([mount.py:250-255](../../unit/src/mount.py#L250)),
 servos hold torque, nothing homes.
@@ -145,7 +145,7 @@ The branch goes in `Unit.start_lifespan` ([unit.py:651-653](../../unit/src/unit.
 
 ### `tested` — a live FastAPI app with no hardware behind it
 
-The tester must be able to: reach `status` (eventually) and read `state: "tested"`, exercise the
+The tester must be able to: reach `status` (eventually) and read `opstate: "tested"`, exercise the
 FastAPI track, and then `quit` to end the process. So `tested` is not "start nothing" — it is
 "start the web stack and nothing else".
 
@@ -175,7 +175,7 @@ needs no special-casing:
 
 | route | returns |
 |---|---|
-| `GET <base_path>/status` | `CanonicalResponse(value={"opmode": "tested", "state": "tested", ...})` |
+| `GET <base_path>/status` | `CanonicalResponse(value={"opmode": "tested", "opstate": "tested", ...})` |
 | `PUT <base_path>/quit` | `CanonicalResponse_Ok`, then the process exits |
 
 `base_path` is passed in by the caller — `Const.BASE_UNIT_PATH` from MAST_unit's `app.py`,
@@ -211,9 +211,9 @@ caught. Have CI set `MAST_CONFIG` to a checked-in test TOML whose `location.root
 directory. That is consistent with the design, not a hole in it: `tested` avoids the config
 **database**, and `LocalConfig` is a local file with no database behind it.
 
-## 4. The reported `state`
+## 4. The reported `opstate`
 
-The unit and the spec report two new values in their status: `opmode`, and a `state` of
+The unit and the spec report two new values in their status: `opmode`, and an `opstate` of
 `standing-by` | `running` | `tested`.
 
 | value | meaning |
@@ -233,23 +233,23 @@ and the covers are closed, whereas a freshly-constructed unit has the mount conn
 energised but unhomed. Both accept the same next commands, so the supervisor does not care. If
 something ever does, `was_shut_down` already distinguishes them on the same status object
 ([common/interfaces/components.py:129-138](../../common/interfaces/components.py#L129)) —
-which is the argument for *not* spending a state value on the distinction.
+which is the argument for *not* spending an `opstate` value on the distinction.
 
 `tested` deliberately appears in both enums. The redundancy earns its place on the wire: a
-client that reads only `state` learns from the single value that this process has no hardware
+client that reads only `opstate` learns from the single value that this process has no hardware
 and will never transition, without having to cross-reference `opmode`. It is terminal — set
 once, never left, and the lifecycle transitions below cannot occur because no `Unit` exists to
 make them.
 
-**`state` says which lifecycle command the machine is living under, not whether it is
+**`opstate` says which lifecycle command the machine is living under, not whether it is
 healthy.** Health stays exactly where it already is: `operational` and `why_not_operational`
-on the same status object. That separation is what keeps `state` a three-value enum — there is
+on the same status object. That separation is what keeps `opstate` a three-value enum — there is
 no `failed`, because a unit that came up with `_init_errors` is `standing-by` *and*
 `operational: false`, which is more informative than either alone. It is also why the running
 state is called `running` and not `operational`: `ComponentStatus.operational` is an existing
 bool meaning "detected, connected, no complaints", and it is `True` in standby too.
 
-`state` cannot be derived from what exists. A fresh `controlled` boot and a fully started unit
+`opstate` cannot be derived from what exists. A fresh `controlled` boot and a fully started unit
 are **identical** on the wire today: `was_shut_down=False`, `operational=True`, `activities=0`.
 
 Do not reuse `UnitActivities` — CLAUDE.md:200-214 makes the bitmask cross-repo co-owned, and
@@ -259,21 +259,21 @@ these are steady states, not activities in flight; a supervisor waiting for a `S
 A read-only property over one private attribute, with **one writer per transition** — now just
 two lines, both in existing methods:
 
-- `_state = STANDING_BY` at the end of `Unit.__init__`, in **all** modes
+- `_opstate = STANDING_BY` at the end of `Unit.__init__`, in **all** modes
 - `→ RUNNING` on entry to `startup()` ([unit.py:264-273](../../unit/src/unit.py#L264)),
   before the thread is spawned
 - `→ STANDING_BY` on entry to `shutdown()` ([unit.py:304-315](../../unit/src/unit.py#L304))
 
 **Transitions fire on receipt of the command, not on its completion** — "got a startup" is the
-requirement's own wording, and it keeps `state` independent of `ontimer`, which §5.2 shows is
+requirement's own wording, and it keeps `opstate` independent of `ontimer`, which §5.2 shows is
 exactly the machinery that can stop running. A supervisor that needs "startup finished, and it
 worked" polls `operational`, or waits on the `x-completion: activity:StartingUp` contract the
 endpoint already publishes. That is one fact per field rather than one field trying to carry
 liveness, progress and health at once.
 
-The supervisor loop: power the computer → poll until `state == "standing-by"` →
+The supervisor loop: power the computer → poll until `opstate == "standing-by"` →
 `PUT /startup` → poll until `operational` → work → `PUT /shutdown` → poll until
-`state == "standing-by"` again → optionally `PUT /powerdown`.
+`opstate == "standing-by"` again → optionally `PUT /powerdown`.
 
 Resolve the mode **once**, at construction (`self._opmode = resolve_opmode()`), and add the
 entry to `CONSTRUCTION_TIME` in `unit/tests/test_config_is_live.py:71-76`. **That guard will
@@ -326,17 +326,20 @@ configured `controlled`.**
 `json_schema_extra` UI block modelled on `LimitFrameConfig.mode` and the no-`tested` validator.
 Observe CLAUDE.md:216 — one key-value entry per line, never wrap a tooltip.
 
-**Wire.** A small `OperatingStatus` mixin in `common/models/statuses.py` carrying
-`opmode: OpMode | None = None` and `state: MachineState | None = None`, added to
+**Wire.** The two new status fields are `opmode` and `opstate` — named as a pair, and
+deliberately not `mode` and `state`, both of which are already ambiguous in this codebase
+(`CoversState`, `LimitFrameMode`, `ComponentStatus.operational`). They go on a small
+`OperatingStatus` mixin in `common/models/statuses.py` carrying
+`opmode: OpMode | None = None` and `opstate: OpState | None = None`, added to
 `FullUnitStatus` (:757) and `SpecStatus` (:860).
 
 `| None = None` is load-bearing. `common` is one shared clone, so the control host gets these
-fields the moment it pulls — before any unit sends them. A defaulted `state = STANDING_BY`
+fields the moment it pulls — before any unit sends them. A defaulted `opstate = STANDING_BY`
 would have control read "standing-by" for a unit that is actually running: a
 plausible-but-wrong value on a safety-adjacent field, worse than a missing one. Note the
-deliberate asymmetry — **config field non-optional with a default** (the merge requires it), **status field optional
-defaulting to `None`** (it is a report, and "not reported" is information). Say so in the
-docstrings.
+deliberate asymmetry — **config field non-optional with a default** (the merge requires it),
+**status field optional defaulting to `None`** (it is a report, and "not reported" is
+information). Say so in the docstrings.
 
 Add `FullUnitStatus`/`unit.py`/`status` to `CONSTRUCTION_SITES` in
 `unit/tests/test_status_fields_are_populated.py:34-38` — a field declared and never passed is
@@ -357,10 +360,10 @@ the name over-promises.
 `Config().get_specs()` reads a single document — one spec per site, no per-machine granularity.
 `resolve_opmode()`'s role dispatch covers it with no new API. MAST_spec (not checked out here)
 needs the `main()` branch, `run_tested_app()` with `Const.BASE_SPEC_PATH`, `opmode`,
-`standby()`, `_state`, the `start_lifespan` branch and a `powerdown` endpoint. Note `SpecStatus`
+`standby()`, `_opstate`, the `start_lifespan` branch and a `powerdown` endpoint. Note `SpecStatus`
 derives from `PowerStatus, BaseStatus`, **not** `ComponentStatus` — which is why the mixin
 exists. The `tested` half is shared outright: same `tested_router`, same two routes, same
-`state: "tested"`, only the base path differs.
+`opstate: "tested"`, only the base path differs.
 
 ## 8. Work items, in dependency order
 
@@ -368,10 +371,10 @@ exists. The `tested` half is shared outright: same `tested_router`, same two rou
 |---|---|---|---|
 | 1 | common | `opmode.py` (enums, resolver, `tested_router`); config fields + validator; `OperatingStatus` mixin; delete `OperatingMode`; tests; `DECISIONS.md` | nothing reads any of it yet |
 | 2 | unit | the four fixes in §5 | stand on their own merit; land under `automatic` |
-| 3 | unit | `_opmode`, `standby()`, `_state`, status fields, lifespan branch, `run_tested_app()` + the `main()` branch, `powerdown` route | no unit configured `controlled` yet |
-| 4 | CI | a smoke job: launch `app.py` with `MAST_OPMODE=tested` and a test `MAST_CONFIG`, poll `status` until it answers `state: "tested"`, `PUT quit`, assert exit 0 | first end-to-end coverage of the app's own entry point, which pytest never touches |
+| 3 | unit | `_opmode`, `standby()`, `_opstate`, status fields, lifespan branch, `run_tested_app()` + the `main()` branch, `powerdown` route | no unit configured `controlled` yet |
+| 4 | CI | a smoke job: launch `app.py` with `MAST_OPMODE=tested` and a test `MAST_CONFIG`, poll `status` until it answers `opstate: "tested"`, `PUT quit`, assert exit 0 | first end-to-end coverage of the app's own entry point, which pytest never touches |
 | 5 | DB | write `opmode = "automatic"` into `units.common`, then flip units to `controlled` | `set_unit` persists only the delta, so per-unit is one key |
-| 6 | spec/control/gui | mirror stages 2-3; read `opmode`/`state`; build the supervisor | |
+| 6 | spec/control/gui | mirror stages 2-3; read `opmode`/`opstate`; build the supervisor | |
 
 **Ordering constraint:** stage 1 must land *and be pulled everywhere* before stage 3 ships.
 
@@ -394,7 +397,7 @@ exists. The `tested` half is shared outright: same `tested_router`, same two rou
 - `unit/tests/test_tested_mode.py` — with `MAST_OPMODE=tested` and `uvicorn.Server.run`
   monkeypatched: `Config.__init__` (monkeypatched to raise) is never reached, and the app's
   routes are **exactly** `<base>/status` and `<base>/quit` — no component routes, no
-  `/mount/startup`. Then, over `TestClient`: `GET status` returns `state == "tested"` and
+  `/mount/startup`. Then, over `TestClient`: `GET status` returns `opstate == "tested"` and
   `opmode == "tested"`; `PUT quit` returns ok **and** sets `server.should_exit`. The
   no-subprocess half is free — `unit/tests/conftest.py:53-122` raises on any spawn.
 - `common/tests/test_tested_router.py` — the router factory in isolation: it mounts on the
@@ -406,8 +409,8 @@ exists. The `tested` half is shared outright: same `tested_router`, same two rou
 - `unit/tests/test_shutdown_returns_to_standing_by.py` — `do_shutdown` no longer cancels the
   timer or sets the event; **start → shut → start ends `running` with `operational` true**
   (the §5.2 regression guard); `end_lifespan` does both.
-- `unit/tests/test_state_transitions.py` — `standing-by` after `__init__` in every mode, even
-  with `_init_errors` set (health belongs to `operational`, not `state`); `running` on entry to
+- `unit/tests/test_opstate_transitions.py` — `standing-by` after `__init__` in every mode, even
+  with `_init_errors` set (health belongs to `operational`, not `opstate`); `running` on entry to
   `startup()` **before** the thread finishes; back to `standing-by` on entry to `shutdown()`;
   **a `shutdown` from `standing-by` leaves it `standing-by`** (the idempotence the two-state
   model buys); and a round trip of `model_dump()` emitting the hyphenated literal, which a JS
@@ -423,17 +426,17 @@ of `endpoint_powerdown` is forgotten; `test_activity_flag_balance.py` demands a 
 **End to end, on mast00** (the bench unit, PDU `mastps00` at 10.23.1.75):
 
 1. `MAST_OPMODE=tested python src/app.py` (with `MAST_CONFIG` pointing at the test TOML) →
-   serves; `GET /mast/api/v1/unit/status` returns `state: "tested"`, `opmode: "tested"`;
+   serves; `GET /mast/api/v1/unit/status` returns `opstate: "tested"`, `opmode: "tested"`;
    `/docs` lists only `status` and `quit`; no PWI4 or ps3cli process appears; nothing touches
    Mongo. Then `PUT /mast/api/v1/unit/quit` → the response arrives, the lifespan's shutdown half
    runs, the process exits 0. **Run this on a machine with no config DB reachable** — that is
    the case it exists for.
 2. `MAST_OPMODE=controlled python src/app.py` → `GET /mast/api/v1/unit/status` reports
-   `state: "standing-by"`, `opmode: "controlled"`. **Confirm physically: covers shut, mount not
+   `opstate: "standing-by"`, `opmode: "controlled"`. **Confirm physically: covers shut, mount not
    homed, stage not at `Sky`, focuser unmoved.**
-3. `PUT /startup` → `state` goes `running` immediately; covers open, mount homes, stage moves;
+3. `PUT /startup` → `opstate` goes `running` immediately; covers open, mount homes, stage moves;
    `operational` goes `true` once `StartingUp` clears.
-4. `PUT /shutdown` → `state` returns to `standing-by`; covers close, mount parks.
+4. `PUT /shutdown` → `opstate` returns to `standing-by`; covers close, mount parks.
 5. **`PUT /startup` again → `running`, and `operational` goes `true` a second time.** This is
    the cycle that is broken today; if `operational` never returns, §5.2 did not land.
 6. `PUT /powerdown` → component outlets off, process still serving, `Computer` outlet untouched.
@@ -476,9 +479,9 @@ does, because it is the party that knows how long it is willing to wait and what
 (`shutdown` and retry, or take the unit out of the pool). This keeps the unit's job to
 reporting truthfully rather than guessing.
 
-**`powerdown` does not change `state`.** A powered-down unit reports `standing-by`, which is
+**`powerdown` does not change `opstate`.** A powered-down unit reports `standing-by`, which is
 accurate — it awaits a `startup`. `PowerStatus.powered` already carries the difference, and the
-supervisor reads both fields. The state enum stays at three values.
+supervisor reads both fields. The `opstate` enum stays at three values.
 
 **No `tested` watchdog.** A `tested` process runs until `quit`. A CI job that dies before
 quitting leaves it running until the runner is torn down, which on a GitHub runner is
