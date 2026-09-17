@@ -308,6 +308,20 @@ partial answer, since it builds against `MAST_common`'s `master` — a breaking 
 turns a consumer red without anything in that consumer having moved, which is exactly how
 the machines are deployed.
 
+**A change that spans both repos is developed on same-named branches**, and in `MAST_unit`
+CI now pairs them automatically: the sibling checkout resolves to `MAST_common`'s branch of
+the same name if it has one, and to `master` otherwise (`MAST_unit#208`). So a cross-repo
+change goes green as a pair, and a push to a trunk — which asks for a branch `MAST_common`
+does not have — still builds against `master`, preserving the property above. The step logs
+which branch it chose.
+
+Before this, such a PR could only go green by hand-editing `ref:` in `ci.yml` to name the
+paired branch, on a commit that then had to be remembered and deleted before the merge. That
+was never a documented procedure, and it was paid three times. **Do not reintroduce it**: if
+a consumer needs an unreleased `MAST_common` change, give both branches the same name. The
+other consumers (`MAST_spec`, `MAST_control`, `MAST_gui`) still check out `master` literally
+and would need the same step to gain this.
+
 In CI, reproduce the layout the machines actually use. For `MAST_unit` that is two
 checkouts side by side plus `PYTHONPATH: ${{ github.workspace }}` standing in for
 `mast.pth` — which makes CI a standing check on that decision. Both repos are public, so
