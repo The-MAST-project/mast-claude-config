@@ -1,14 +1,15 @@
 # The MAST supervisor
 
 > A Windows service (`mast-service`, session 0) that spawns an interactive supervisor
-> (`mast-supervisor`, the autologon session). The supervisor shows a small GUI with a rolling
-> log and a five-minute state heartbeat, waits for the network / RAM disk / share, reads the
-> config DB, owns PWI4, PHD2 and ps3cli, and launches either VSCode or the unit/spec app
-> according to `opmode`.
+> (`mast-supervisor`, the autologon session). The supervisor waits for the network / RAM disk /
+> share, reads the config DB, owns PWI4, PHD2 and ps3cli, and launches either VSCode or the
+> unit/spec app according to `opmode`. It reports its state through three surfaces built on one
+> snapshot: a small GUI with a rolling log, a five-minute heartbeat in the log file, and
+> `GET /status` on port 8004.
 >
 > **Status: plan only — not implemented; all design questions closed.**
 > Depends on `claude/plans/opmode-design.md` stage 1. Code baseline: MAST_common `master`
-> @ `5dfd263`, MAST_unit `main`, 2026-09-16.
+> @ `5dfd263`, MAST_unit `main`, 2026-09-16; revised 2026-09-22.
 
 ## Context
 
@@ -64,15 +65,23 @@ common/supervisor/
   launcher.py     build_launch(): the pure role+opmode -> LaunchSpec function
   locate.py       locate_vscode_exe(), locate_pwi4_exe()  — modelled on phd2_locate.py
   logsink.py      DequeHandler, rebind_daily_handler()
-  gui_model.py    snapshots + the pure drain function — NO tkinter
-  gui.py          the tkinter window                                            [tkinter]
+  state.py        the published snapshot (Pydantic) — one source for GUI, heartbeat and API
+  api.py          the FastAPI app: GET /status                          [fastapi, uvicorn]
+  gui_model.py    the pure drain function — NO tkinter
+  gui.py          the tkinter window                   [tkinter; ttkbootstrap if installed]
 common/config/supervisor.py
 common/services/mast-service/install-mast-service.ps1
 ```
 
 `__init__.py` holds a docstring and no imports; nothing elsewhere in `common` reaches into the
-package. `win32*` lives only in `session.py`/`service.py`, `tkinter` only in `gui.py`, so the
-Linux control host and the CI image import none of it.
+package. `win32*` lives only in `session.py`/`service.py`, `tkinter` and `ttkbootstrap` only in
+`gui.py`, so the Linux control host and the CI image import none of it.
+
+**`state.py` is the load-bearing one.** Three surfaces render the supervisor's state — the GUI
+tables (§7), the heartbeat block (§7) and `GET /status` — and all three read the same published
+snapshot. It is a Pydantic model so FastAPI serialises it with no second schema, and it imports
+neither `tkinter` nor `fastapi`, so the snapshot tests run on Linux CI. `gui_model.py` keeps only
+the drain.
 
 Both processes are `python.exe`, which `find_process`'s image-name match cannot tell apart, so
 each carries an explicit `--role` argument **and** a `Global\` named mutex — copy the shape of
@@ -147,6 +156,9 @@ STARTING → WAITING_FOR_RESOURCES → LOADING_CONFIG → SUPERVISING → LAUNCH
                                                                                 → DEGRADED
 ```
 
+**The status API binds in `STARTING`**, before the resource wait and before `Config()` — see
+§7's status-API subsection for why that ordering is the whole point of the endpoint.
+
 | resource | probe | "available" means |
 |---|---|---|
 | network | `gethostbyname(controller_host.domain)`, then `create_connection((fqdn, mongo_port), 2s)` | both succeed |
@@ -215,6 +227,13 @@ respawn; `_Backoff(5.0, cap 120.0)` between restarts; more than 5 restarts in 60
 button. A PWI4 that exits immediately because the mount is unplugged must not be restarted
 eight thousand times a night.
 
+**`not_supervised` is a distinct state, not a flavour of unhealthy.** VSCode under `automatic`
+(§8) is launched once and never restarted, so "not running" is its normal resting condition.
+If that serialises as unhealthy, every developer machine reds out permanently on any fleet view
+built over `/status` — and a status surface that is always red is one nobody reads. The state
+enum therefore carries `not_supervised` alongside `healthy` / `unhealthy` / `crash_looped`, and
+neither the GUI's colour mapping nor the heartbeat's severity rule (§7) treats it as a fault.
+
 **A PHD2 restart does not restart the app** — *decided*. The supervisor restarts PHD2 and
 reports it; the app will keep reporting a dead guider healthy until MAST_unit clears
 `_connected` on socket loss and revives `reconnect()`. That fix is therefore a **prerequisite,
@@ -223,13 +242,46 @@ not a follow-up** (§12), because until it lands a PHD2 restart leaves the unit 
 Which processes run is config-driven, not role-hardcoded: defaulted to pwi4/phd2/ps3cli in
 `units.common` and `{}` in `specs`.
 
-## 7. The GUI
+## 7. The operator surfaces
+
+Three renderers of the one snapshot published by `state.py` (§2): the window, the heartbeat
+block in the log, and `GET /status`. Each subsection below is one of them.
+
+### The window
 
 The Tk mainloop owns the main thread; workers start first. `--no-gui` blocks on a stop event
 instead, and a `TclError` falls back to headless with a log line. **The supervisor must never
 die because its window could not open.**
 
 One `ttk` window, min 900×600.
+
+**`ttkbootstrap` is suggested, not required.** Plain `ttk` is the baseline and the design assumes
+nothing else. What the suggestion buys, against what it costs:
+
+- Its widgets **subclass** the `ttk` ones — `ttkbootstrap.Treeview` *is* a `ttk.Treeview`,
+  `ttkbootstrap.Button` *is* a `ttk.Button` — so the fallback is a ~15-line shim: try the import,
+  else alias the names to plain `ttk` and drop the `bootstyle` keyword. Build that shim up front.
+  It extends the rule above to *"…nor because `ttkbootstrap` is not installed"*, and it is the
+  insurance against a single-maintainer dependency in a program meant to run unattended for years.
+- Its semantic styles — `success` / `warning` / `danger` — are the colour vocabulary this design
+  already speaks: §5's amber resource, §6's red `CRASH_LOOPED`, the per-level log tags below. No
+  hand-picked hex values.
+- 30 themes, every one paired light/dark. A window that lives in a dome at night has a real use
+  for a first-class dark theme, and plain `ttk` has none.
+- The marginal cost on a unit is small: pure Python, ~3.7 MB, one dependency — Pillow, already
+  pinned at the same version in `unit/requirements.txt`. **Not** in `common/requirements.txt`;
+  see §10 for where the requirement goes and why that placement is the point.
+
+Two things it does **not** buy, so nobody expects them. It changes appearance only — the
+`DequeHandler`, the drain, the per-tick cap, the widget trim and §11's `FakeText` tests all
+survive unchanged; if that machinery is what bothers you, a different toolkit is the answer, not
+a theme. And `Text`/`ScrolledText` is a classic Tk widget rather than a themed one, so confirm
+the log pane actually takes a dark theme's background before committing — the log pane is most
+of the window.
+
+Pin it (`ttkbootstrap==2.2.3`) if adopted. The 1.x→2.x reorganisation was substantial and most
+material online is still 1.x: `ScrolledText`, the widget this design needs, moved from
+`ttkbootstrap.scrolled` to the top-level package.
 
 **Menu bar: Actions | About | Help.** `About` gives version, `<top>`, hostname, role, config
 generation and a copy-diagnostics button; `Help` points at `docs/supervision.md` and the log
@@ -395,6 +447,55 @@ snapshot, never from live state, for the same reason the tables do.
 At 300 s this is 288 records a night — a few thousand lines in the daily file, which the existing
 Cygwin logrotate already handles.
 
+### The status API — `GET /status`
+
+A FastAPI app on uvicorn inside the supervisor process, serving
+`/mast/api/v1/supervisor/status`: the prerequisite resources and the supervised processes, as a
+`CanonicalResponse` wrapping the same `state.py` snapshot the window and the heartbeat render.
+It is the first time a machine's *precondition* state is legible from anywhere but the machine —
+answering "why did mast07 not observe" today needs the share and the morning-after log file.
+
+Four constraints, and the first is not optional.
+
+**The port is a constant in `common/const.py`, not a `services` row.** `SUPERVISOR_PORT = 8004`
+and `BASE_SUPERVISOR_PATH = "/mast/api/v1/supervisor"`, hardcoded. Every other MAST port comes
+from `get_service()`, and that is exactly what this one must not do: §5 defines the network probe
+as *can reach the config DB*, so a machine stuck in `WAITING_FOR_RESOURCES` is by construction a
+machine that cannot look up its own port. Put the reason in a comment beside the constant —
+otherwise someone later tidies the inconsistency away and removes the endpoint's whole purpose.
+8004 was free at the time of writing: the `services` collection holds only `unit` 8000, `spec`
+8001, `safety` 8001, `control` 8002, and neither MAST_common nor MAST_unit references it.
+(MAST_spec, MAST_control, MAST_gui and MAST_provisioning were not checked — one grep before
+stage 1.)
+
+**Bind in `STARTING`**, before the resource wait and before `Config()`. A `/status` that appears
+only once the machine is healthy answers a question nobody is asking; the valuable payload is
+`phase=WAITING_FOR_RESOURCES network=down share=down`, which is precisely the window in which a
+DB-derived port would not exist.
+
+**It must not be able to kill the supervisor.** The Tk mainloop owns the main thread, so uvicorn
+runs in a worker with `install_signal_handlers=False` — without it, `Server.run()` raises off the
+main thread. A bind failure (port taken, another supervisor mid-restart) degrades to no-API with
+one WARNING, under the same rule as the window: **the supervisor must never die because a surface
+could not open.**
+
+**Read-only, and the binding enforces it.** §13's boundary — *the supervisor is a console at the
+telescope, not a remote-control surface* — survives a read-only endpoint intact. But `/status` is
+exactly where someone will later want `POST /opmode`, and §13's argument applies to an HTTP verb
+identically: a physical event must not be the silent consequence of someone saving a form. So
+**the read route binds `0.0.0.0` and any future action route binds `127.0.0.1` only** — status
+readable fleet-wide, the two operator verbs physically-present-only. That makes the boundary
+mechanical rather than a convention, and it closes the door before anyone opens it. Say so in
+`api.py`'s module docstring.
+
+No `ApiDomain.Supervisor` and no `SupervisorApi(BaseApi)` yet — that is a client with no caller.
+Add them when MAST_gui or the controller actually polls.
+
+Two consequences to state rather than discover. Restart-to-apply (§7) drops the port for about
+ten seconds, and from outside `ECONNREFUSED` is indistinguishable from a dead machine; nothing to
+be done, but a poller will alarm and the design should have said so first. And **the service
+(session 0) serves nothing** — same rule as §4, for the same reason.
+
 ## 8. Launching the app
 
 `<top> = Path(common.__file__).resolve().parents[1]` — the same derivation `mast.pth` uses, and
@@ -423,10 +524,16 @@ invert the opmode plan's precedence.
   because `operational` is false; that is health, and the opmode plan puts health in
   `operational`/`why_not_operational`.
 - **`automatic`** → the supervisor launches **VSCode** on `<top>/mast-<role>.code-workspace`
-  (which already exists on this machine) and does not supervise it: `Code.exe` forks and exits,
-  and an operator legitimately closes the editor. The row reads `launched (not supervised)` with
-  a relaunch button. The app is started by the developer pressing F5; the supervisor still runs
-  the status probe read-only so the GUI shows the app once it appears.
+  (which already exists on this machine) **once, at startup, and never again** — *decided*.
+  Restarting the editor is the user's prerogative, not the supervisor's. Launch-once is still
+  right, because it is what makes a reboot land the developer at their workspace with no
+  keystroke; every subsequent launch is theirs, via the row's relaunch button. The row reads
+  `launched (not supervised)` and its state is §6's `not_supervised`, never `unhealthy` — a
+  closed editor is the normal resting condition, and anything polling `/status` must not see a
+  fault. The mechanism agrees with the policy anyway: `Code.exe` forks and exits, so the launch
+  handle tells you nothing and "restart it" would mean matching image name plus workspace
+  argument. The app is started by the developer pressing F5; the supervisor still runs the status
+  probe read-only so the GUI shows the app once it appears.
 - **`tested`** → CI only; the supervisor is not involved.
 
 `build_launch(role, opmode, top, conf, env) -> LaunchSpec` is a pure function. That is what
@@ -478,6 +585,19 @@ rewiring `pwi4_client`/`phd2`/`ps3cli_client` to import them is a **follow-up**,
 — making them configurable in the supervisor alone would let the supervisor and the app disagree
 about where PHD2 is, which is worse than a constant.
 
+`SUPERVISOR_PORT` and `BASE_SUPERVISOR_PATH` also go in `common/const.py`, but they are a
+different case and the comment beside them must say so: they are deliberately **not** configurable
+and deliberately **not** a `services` row, for the reason in §7's status-API subsection.
+
+**Where the `ttkbootstrap` requirement goes, if it is adopted: `unit/requirements.txt` and
+`spec/requirements.txt` — not `common/requirements.txt`.** The obvious move is wrong. The code
+lives in `common/`, so the requirement looks like it belongs there; but `common`'s requirements
+are installed on the Linux control host and in the CI image, and ttkbootstrap would drag Pillow
+(which `common` does not currently depend on) onto machines that will never open a window. The
+dependency obeys the same rule as the import (§2): `tkinter` and `ttkbootstrap` are confined to
+`gui.py`, so their requirements are confined to the projects that run a GUI. §7's import-guarded
+fallback to plain `ttk` is what makes that placement safe rather than fragile.
+
 Nothing new in `C:\WIS\config.toml`. Resist adding a `MAST_TOP` env var.
 
 ## 11. Verification
@@ -515,6 +635,15 @@ process; and a phase change emits one immediately rather than waiting for the in
 delta; and each returns the restart request rather than calling `sys.exit` itself, so the
 decision is testable apart from the exit.
 
+`test_supervisor_status_api.py` drives the app with FastAPI's `TestClient` — no uvicorn, no
+socket, so it runs on Linux CI: `/status` answers from a `STARTING` snapshot **before any
+resource is ready and before `Config()` has loaded**, which is the endpoint's reason to exist and
+therefore the assertion that matters most; the body is a `CanonicalResponse` with the snapshot
+under `value`; a `not_supervised` process does not make the overall report a fault; and the path
+is built from `BASE_SUPERVISOR_PATH` rather than a literal. Separately, assert
+`SUPERVISOR_PORT` is a plain constant and that nothing in the supervisor package calls
+`get_service()` to find it — that is the one invariant a later tidy-up would break silently.
+
 Add `win32process.CreateProcess`/`CreateProcessAsUser` to the denied set in both conftests — the
 guard has a second door now.
 
@@ -522,7 +651,14 @@ guard has a second door now.
 appears in the interactive session within 30 s; `sc stop` → it goes, with no orphan;
 `taskkill /f` the service → the supervisor dies with it (the job object); log off and back on →
 it reappears in the new session; kill PWI4 by hand → back within ~15 s and the GUI says so;
-reboot → everything comes up with no keystroke.
+reboot → everything comes up with no keystroke; and **`curl http://<unit>:8004/mast/api/v1/supervisor/status`
+from the control machine answers while the unit is still in `WAITING_FOR_RESOURCES`** — which is
+both the endpoint's purpose and the only check that the inbound firewall rule actually landed.
+
+Whichever toolkit §7 settles on, its rendering under `CreateProcessAsUser` with
+`CREATE_NEW_CONSOLE` in an autologon session belongs here too, not in a unit test: whether a
+themed `ttk` window or a TUI comes up correctly depends on that session's window station and, for
+a console, on whether it is `conhost` or Windows Terminal.
 
 ## 12. Prerequisites
 
@@ -585,10 +721,10 @@ telescope, not a remote-control surface.
 | stage | repo | contents |
 |---|---|---|
 | 0 | common | `common/opmode.py` (the merged opmode plan, stage 1) — prerequisite |
-| 1 | common | `config/supervisor.py`; `const.py` ports + `MINIMUM_PWI4_VERSION`; `find_processes`/`process_session_id`; `init_log` gains `file_leaf`; **a `sites` write path** (`$addToSet`/`$pull` on `units_in_maintenance`) beside `write_unit_delta` |
-| 2 | common | resources, probes, managed, launcher, locate, logsink, gui_model + every test. `--dry-run` prints the resolved plan and exits |
-| 3 | common | gui (incl. the Actions menu and its modals), supervisor, `__main__`. **Run a night on mast00** as `--gui --no-service --no-app`, supervising PWI4/PHD2/ps3cli while `mast-unit` still runs the app — adoption is what makes two owners safe, and this is the highest-value de-risking step |
-| 4 | prov. | autologon; nssm at a managed path; write `<top>/mast-<role>.code-workspace` |
+| 1 | common | `config/supervisor.py`; `const.py` ports + `MINIMUM_PWI4_VERSION` + `SUPERVISOR_PORT` (8004, after the cross-repo grep) + `BASE_SUPERVISOR_PATH`; `find_processes`/`process_session_id`; `init_log` gains `file_leaf`; **a `sites` write path** (`$addToSet`/`$pull` on `units_in_maintenance`) beside `write_unit_delta` |
+| 2 | common | `state.py`, resources, probes, managed, launcher, locate, logsink, gui_model + every test. `--dry-run` prints the resolved plan and exits |
+| 3 | common | `api.py` and the status endpoint; gui (incl. the Actions menu and its modals), supervisor, `__main__`. **Run a night on mast00** as `--gui --no-service --no-app`, supervising PWI4/PHD2/ps3cli while `mast-unit` still runs the app — adoption is what makes two owners safe, and this is the highest-value de-risking step |
+| 4 | prov. | autologon; nssm at a managed path; write `<top>/mast-<role>.code-workspace`; **open 8004 inbound** on each unit; `ttkbootstrap` in `unit`/`spec` requirements if adopted |
 | 5 | common | session, service, installer. Install on mast00 with `mast-unit` stopped but installed — rollback is `sc stop mast-service; sc start mast-unit` |
 | 6 | unit | the §9 deletions and the PHD2 fix; **only now is `mast-unit` removed** |
 | 7 | spec | mirror stage 6 |
@@ -597,6 +733,14 @@ telescope, not a remote-control surface.
 `init_log` gaining `file_leaf` in stage 1 is the fix for the log collision: without it the
 supervisor would write `mast-unit-log.txt`, the same file the app appends to, from a second
 process over SMB, with no PID in the format to tell them apart.
+
+Stage 4's firewall entry is **unverified work, not a formality**: mast00 has no MAST inbound
+rules at all — `netsh` shows none — which is consistent with §12's finding that it predates
+MAST_provisioning, and means this machine cannot tell you whether provisioning opens 8000
+specifically or a range. If it opens only 8000, 8004 needs its own rule on every unit; if a
+range, possibly nothing. Someone with a full MAST_provisioning checkout should answer that
+alongside the autologon question. Until then, `/status` is reachable on the machine and nowhere
+else — which is the one place it is not needed.
 
 ## Provenance
 
@@ -612,10 +756,36 @@ confirmation modal; an `opmode` changed elsewhere is reported with an Apply item
 acted on; and a five-minute heartbeat logs full state to both the window and the file, because
 transition-only logging cannot distinguish a quiet night from a dead supervisor.
 
+**Revised 2026-09-22**, third round with Arie, four further decisions. The name `mast-supervisor`
+was confirmed — it was already used throughout, so nothing changed but the dangling reference
+noted below. A **FastAPI wrapper serving `GET /status`** was added (§7), reporting the
+prerequisite resources and the supervised processes; its four constraints — a constant port
+rather than a `services` row, binding in `STARTING`, never killing the supervisor, and
+read-on-`0.0.0.0`/write-on-`127.0.0.1` — all follow from the endpoint's purpose being to describe
+a machine that cannot reach the config DB. That in turn promoted the snapshot out of `gui_model.py`
+into `state.py`, now rendered by three surfaces rather than two. **VSCode under `automatic` is
+launched once and never restarted** (§8), the user's prerogative, which required `not_supervised`
+as a state distinct from unhealthy (§6) so that a closed editor is not a fleet-wide fault.
+`SUPERVISOR_PORT = 8004` was verified free against the live `services` collection (`unit` 8000,
+`spec` 8001, `safety` 8001, `control` 8002) and both clones here.
+
+**`ttkbootstrap` is recorded as a suggestion, not a requirement** (§7). The GUI toolkit was
+surveyed at Arie's request — tkinter, Rich `Live`, Textual, PySide6, wxPython, Dear PyGui,
+CustomTkinter, pywebview, NiceGUI and others — and ttkbootstrap 2.2.3 was tried locally in a
+throwaway venv. It won on marginal cost (pure Python, ~3.7 MB, its one dependency Pillow already
+pinned in `unit/requirements.txt`), on a cheap fallback (its widgets subclass the `ttk` ones), and
+on having 30 paired light/dark themes where plain `ttk` has none. It is a suggestion because it
+buys appearance only: the threading and test machinery of §7 and §11 is unchanged by it, and the
+baseline remains plain `ttk`. Textual remains the alternative if that machinery, rather than the
+looks, is what should go.
+
 MAST_spec, MAST_control and MAST_provisioning could not be consulted — provisioning is a sparse
 checkout here (top-level files plus `tools/`), so `server/providers/mast/provide-mast.ps1`, the
 script that installs the deployed service, was not readable. The supervision decision record
 cited at `retire-pwshutter-and-ascom-covers.md:250`
 (`docs/decisions/2026-08-12-one-nssm-service-supervises-an-interactive-monitor.md`) **does not
 exist** — not on disk and not in that repo's index. It is a dangling reference, and this plan is
-the first written supervision design in MAST.
+the first written supervision design in MAST. It is also the only surviving use of "monitor" for
+this program: if that record is ever written, name it `…-supervises-an-interactive-supervisor.md`.
+`mast-monitor` appears nowhere in MAST_common, MAST_unit or mast-claude-config; the other three
+repos were not checked from here.
