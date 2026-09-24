@@ -71,7 +71,7 @@ that must always work can stay on a known-good revision while common moves.
 | MAST_common | MAST_supervision |
 |---|---|
 | `config/supervisor.py` — the schema sits beside `UnitConfig`/`SpecsConfig` | the service, the session bridge, the supervisor and everything below |
-| `const.py` — ports, `SUPERVISOR_PORT`, `BASE_SUPERVISOR_PATH`, `MINIMUM_PWI4_VERSION` | its own `pyproject.toml`, CI, README, DECISIONS |
+| `const.py` — ports, `SUPERVISOR_PORT`, `BASE_SUPERVISOR_PATH`, `MINIMUM_PWI4_VERSION` | its own `pyproject.toml`, CI, README, `docs/decisions/` |
 | `process.py` — `find_processes(session_id=)`, `process_session_id()` | the installer |
 | `opmode.py`, `init_log(file_leaf=)`, and later a `SupervisorApi` client | |
 
@@ -786,7 +786,7 @@ telescope, not a remote-control surface.
 |---|---|---|
 | 0 | common | `common/opmode.py` (the merged opmode plan, stage 1) — prerequisite |
 | 1 | common | `config/supervisor.py`; `const.py` ports + `MINIMUM_PWI4_VERSION` + `SUPERVISOR_PORT` (8004, after the cross-repo grep) + `BASE_SUPERVISOR_PATH`; `find_processes`/`process_session_id`; `init_log` gains `file_leaf`; **a `sites` write path** (`$addToSet`/`$pull` on `units_in_maintenance`) beside `write_unit_delta` |
-| 1a | supervision | the seed: `pyproject.toml`, `uv.lock`, `ruff.toml`, CI (Linux + Windows, paired MAST_common branch), README, DECISIONS, CLAUDE.md, the package-location test |
+| 1a | supervision | the seed: `pyproject.toml`, `uv.lock`, `ruff.toml`, CI (Linux + Windows, paired MAST_common branch), README, `docs/decisions/` records (MAST_provisioning's format), CLAUDE.md, the package-location test |
 | 1b | prov. | `mast-repos.tsv` row (`supervision`, `MAST_supervision`, `unit,spec`, `main`); `mast-clone` accepts `pyproject.toml` — `-r <dir>/pyproject.toml --group <dir>/pyproject.toml:dev` — where a repo has no `requirements.txt` |
 | 2 | supervision | `state.py`, resources, probes, managed, launcher, locate, logsink, gui_model + every test. `--dry-run` prints the resolved plan and exits |
 | 3 | supervision | `api.py` and the status endpoint; gui (incl. the Actions menu and its modals), supervisor, `__main__`. **Run a night on mast00** as `--gui --no-service --no-app`, supervising PWI4/ps3cli and observing PHD2 while the operator runs the app from VSCode — adoption is what makes two owners safe, and this is the highest-value de-risking step |
