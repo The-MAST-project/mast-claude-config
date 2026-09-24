@@ -7,9 +7,11 @@
 > snapshot: a small GUI with a rolling log, a five-minute heartbeat in the log file, and
 > `GET /status` on port 8004.
 >
-> **Status: plan only — not implemented; all design questions closed.**
+> **Status: plan only — not implemented; design questions closed but one** — what maintenance
+> does on the machine, reopened by the predecessor record (see the 2026-09-24 provenance round).
+> Code home: the **MAST_supervision** repo (§2), with its shared building blocks in MAST_common.
 > Depends on `claude/plans/opmode-design.md` stage 1. Code baseline: MAST_common `master`
-> @ `5dfd263`, MAST_unit `main`, 2026-09-16; revised 2026-09-22.
+> @ `5dfd263`, MAST_unit `main`, 2026-09-16; revised 2026-09-22 and 2026-09-24.
 
 ## Context
 
@@ -20,16 +22,18 @@ would restart it. **If any of the three dies, nothing notices and nothing restar
 in PHD2's case the unit keeps reporting the guider healthy, because `_read_forever` never
 clears `_connected` ([phd2.py:864-874](../../unit/src/phd2/phd2.py#L864)).
 
-Nor does anything wait for the machine's preconditions. The NSSM service starts on a
-`SERVICE_DELAYED_AUTO_START` timer and hopes: no network check exists anywhere in the fleet,
-the ImDisk RAM disk holding the astrometry indexes is checked only for directory existence
-(the per-file check at [mastrometry.py:79-94](../../unit/src/solvers/mastrometry.py#L79) is
+Nor does anything start the app. Since MAST_provisioning#159 no MAST Windows service exists:
+provisioning registers none and removes any it finds, and an operator runs the unit app by hand
+from VSCode. (When NSSM did start it, it did so on a `SERVICE_DELAYED_AUTO_START` timer and
+hoped.) Nor does anything wait for the machine's preconditions: no network check exists
+anywhere in the fleet, the ImDisk RAM disk holding the astrometry indexes is checked only for
+directory existence (the per-file check at [mastrometry.py:79-94](../../unit/src/solvers/mastrometry.py#L79) is
 commented out behind a TODO), and the share probe is consulted lazily by the log handler
 rather than waited on. `common/DECISIONS.md:74-79` records the shape of the resulting failure:
 "nssm restarted a process that died before it could listen… the operator saw a running
 service, an unanswered port, and a traceback they had to go find".
 
-And there is nothing to look at. Every MAST program is a headless uvicorn service under NSSM.
+And there is nothing to look at. Every MAST program is a headless uvicorn process.
 An operator standing at a unit has no way to see what state it is in.
 
 **The outcome:** one supervision chain, one place that knows why a machine is not observing,
@@ -48,15 +52,38 @@ stay as the outermost backstop.
 
 ## 2. Where the code lives
 
-**`common/supervisor/`, a package in MAST_common** — not a new repo. It must run on unit and
-spec machines, both of which already have `<top>/common/` and the `mast.pth` that puts `<top>`
-on `sys.path`; a new repo needs a clone, a `.pth` entry, CI and a provisioning entry, none of
-which this plan could deliver. Every probe it needs is already in `common`.
+**A new repo, MAST_supervision, cloned as `<top>/supervision/`** — *decided* 2026-09-24,
+superseding the first draft's `common/supervisor/`. The repo root is the `supervision` package,
+exactly as MAST_common's root is `common`, so the `mast.pth` that already puts `<top>` on
+`sys.path` imports it with no new `.pth` entry; provisioning's clone manifest
+(`tools/mast-repos.tsv`) takes one row.
+
+The reason is that the supervisor is an **application**, of a kind with MAST_unit and
+MAST_spec, and MAST_common is a **library** — installed on the Linux control host and in CI
+images. Inside common the supervisor needed fences (win32 in two files only, the GUI dependency
+kept out of common's requirements, a refusal on the control host), and it would have shipped with
+every common pull made for the app's sake, including onto a feature branch someone checked out in
+the shared clone. A repo of its own is pinned independently in the manifest, so the one program
+that must always work can stay on a known-good revision while common moves.
+
+**The split: whatever another program imports stays in common.**
+
+| MAST_common | MAST_supervision |
+|---|---|
+| `config/supervisor.py` — the schema sits beside `UnitConfig`/`SpecsConfig` | the service, the session bridge, the supervisor and everything below |
+| `const.py` — ports, `SUPERVISOR_PORT`, `BASE_SUPERVISOR_PATH`, `MINIMUM_PWI4_VERSION` | its own `pyproject.toml`, CI, README, DECISIONS |
+| `process.py` — `find_processes(session_id=)`, `process_session_id()` | the installer |
+| `opmode.py`, `init_log(file_leaf=)`, and later a `SupervisorApi` client | |
+
+`state.py` stays in MAST_supervision until a second program (a MAST_gui fleet view) actually
+imports the snapshot model; promote it to common then.
 
 ```
-common/supervisor/
-  __main__.py     `python -m common.supervisor`  -> the interactive supervisor
-  service.py      session-0 side: the NSSM application, owns the child watchdog  [Windows]
+supervision/                  the repo root = the `supervision` package
+  __init__.py     docstring only, no imports
+  __main__.py     `python -m supervision`          -> mast-supervisor
+  service.py      `python -m supervision.service`  -> mast-service: the NSSM application,
+                  owns the child watchdog                                        [Windows]
   session.py      the WTS / CreateProcessAsUser bridge, behind a replaceable API [Windows]
   supervisor.py   the phase machine
   resources.py    network / ramdisk+indexes / share probes
@@ -69,13 +96,18 @@ common/supervisor/
   api.py          the FastAPI app: GET /status                          [fastapi, uvicorn]
   gui_model.py    the pure drain function — NO tkinter
   gui.py          the tkinter window                   [tkinter; ttkbootstrap if installed]
-common/config/supervisor.py
-common/services/mast-service/install-mast-service.ps1
+  install/install-mast-service.ps1
+  tests/
+  pyproject.toml  dependencies (not requirements.txt) — see §10
 ```
 
-`__init__.py` holds a docstring and no imports; nothing elsewhere in `common` reaches into the
-package. `win32*` lives only in `session.py`/`service.py`, `tkinter` and `ttkbootstrap` only in
-`gui.py`, so the Linux control host and the CI image import none of it.
+`win32*` lives only in `session.py`/`service.py`, `tkinter` and `ttkbootstrap` only in `gui.py`,
+so the package imports on Linux CI. The installer sits in `install/`, not `service/`, which would
+collide with `service.py`.
+
+The name collides with an unrelated PyPI package, Roboflow's `supervision`. `mast.pth` entries
+come after site-packages on `sys.path`, so an install of it would silently shadow ours;
+`tests/test_package_location.py` asserts the import resolves to the checkout.
 
 **`state.py` is the load-bearing one.** Three surfaces render the supervisor's state — the GUI
 tables (§7), the heartbeat block (§7) and `GET /status` — and all three read the same published
@@ -90,10 +122,24 @@ documents the session-0/session-1 scoping and `SeCreateGlobalPrivilege`.
 
 ## 3. The service
 
-`common/services/mast-service/install-mast-service.ps1`, replacing
-[unit/service/mast-service.ps1](../../unit/service/mast-service.ps1). Runs
-`python.exe -m common.supervisor.service`, `AppDirectory=<top>`, keeping the existing
-AppStdout/AppStderr rotation, `AppRestartDelay 5000` and the `sc.exe failure` triple.
+`supervision/install/install-mast-service.ps1`. Runs `python.exe -m supervision.service`,
+`AppDirectory=<top>`, with AppStdout/AppStderr rotation, `AppRestartDelay 5000` and the
+`sc.exe failure` triple, as the retired `mast-unit` installer had.
+
+**This reverses a recorded MAST_provisioning decision, and needs a superseding one.**
+MAST_provisioning#159 removed every MAST service: provisioning registers none, stands any down
+before a run, and asserts absence at the end; `server/prov/tests/test_no_service_registration.py`
+fails the build if a registration comes back
+(`docs/decisions/2026-08-30-provisioning-registers-no-mast-service.md`). Its two reasons were
+that a session-0 service is a **competing** path into the processes — a session-0 PWI4 adopted
+by a hand-run unit that can neither draw with it nor see `Z:` — and that `mast-unit` commanded
+hardware on process start with no interlock. `mast-service` answers both by construction: it
+spawns nothing but the supervisor, and the supervisor and everything it starts run in the
+interactive session (§4); and under `automatic` it launches VSCode, never the app (§8). So the
+supersession is a change of reason, not a reversal of intent — but it is provisioning's decision
+to record, beside the test and the finalize assertion it relaxes for `mast-service` alone.
+`mast-service` is not among `Get-MastServiceNames`' four names, so the stand-down would not remove
+it; the test and the absence assertion would still fail the run.
 
 **As LocalSystem — `ObjectName` omitted.** `WTSQueryUserToken` needs `SE_TCB_NAME` and
 `CreateProcessAsUser` needs `SE_ASSIGNPRIMARYTOKEN_NAME`; LocalSystem holds both. Granting
@@ -102,11 +148,10 @@ the installer's interactive password prompt, which is why it cannot run from pro
 today. `unit/CLAUDE.md:45`'s `Path.home()` → `systemprofile` warning becomes obsolete in the
 same change: the app now runs under the interactive `mast` token.
 
-`$Top = Split-Path (Split-Path $PSScriptRoot)` rather than a hardcoded path — the current
-`C:\Users\mast\PycharmProjects\MAST_unit.2024-12-12` is the actual bug in that file.
+`$Top = Split-Path (Split-Path $PSScriptRoot)` rather than a hardcoded path — the retired
+installer's hardcoded `C:\Users\mast\PycharmProjects\MAST_unit.2024-12-12` was its actual bug.
 
-**The installer removes `mast-unit`.** Two services would mean two uvicorns on one port and two
-owners of PWI4.
+There is no `mast-unit` service left to replace: MAST_provisioning#159 removed it fleet-wide.
 
 ## 4. The session bridge
 
@@ -189,7 +234,7 @@ loudly and idles — that host is Linux and will never run this.
 
 ## 6. Process supervision
 
-**Write `common/supervisor/managed.py`; do not fix `WatchedProcess`.** Its only caller passes
+**Write `supervision/managed.py`; do not fix `WatchedProcess`.** Its only caller passes
 `no_restart=True`, so the watcher, `restart_event` and `reconnect()` are already dead code; its
 kill-first at [process.py:230-232](../../common/process.py#L230) is exactly what must go; it has
 no health concept, only liveness; and its two real bugs (`stream.read_line`, and logging via the
@@ -242,6 +287,15 @@ not a follow-up** (§12), because until it lands a PHD2 restart leaves the unit 
 Which processes run is config-driven, not role-hardcoded: defaulted to pwi4/phd2/ps3cli in
 `units.common` and `{}` in `specs`.
 
+**PHD2 is observe-only until §9.2 lands.** Until then `PHD2Connector.__init__` spawns phd2.exe
+itself through `WatchedProcess.start()`, which first calls `kill_process_by_name()`. Either that
+kills the supervisor's PHD2 — and the supervisor restarts it into a fight — or its name match
+misses (the path is backslashed, the split is on `/`; unverified) and a second instance starts.
+So `ManagedProcessConfig` carries an observe mode: probe and report, never spawn or restart.
+PHD2's default flips to supervised in the same change as §9.2. PWI4 and ps3cli need no such
+mode: `app.py` raises them through `ensure_process_is_running`, which starts one only if none
+is running, so it finds the supervisor's and leaves it alone.
+
 ## 7. The operator surfaces
 
 Three renderers of the one snapshot published by `state.py` (§2): the window, the heartbeat
@@ -269,8 +323,8 @@ nothing else. What the suggestion buys, against what it costs:
 - 30 themes, every one paired light/dark. A window that lives in a dome at night has a real use
   for a first-class dark theme, and plain `ttk` has none.
 - The marginal cost on a unit is small: pure Python, ~3.7 MB, one dependency — Pillow, already
-  pinned at the same version in `unit/requirements.txt`. **Not** in `common/requirements.txt`;
-  see §10 for where the requirement goes and why that placement is the point.
+  pinned at the same version in `unit/requirements.txt`. It goes in MAST_supervision's
+  `pyproject.toml`, exactly pinned, as a library no other MAST repo uses; see §10.
 
 Two things it does **not** buy, so nobody expects them. It changes appearance only — the
 `DequeHandler`, the drain, the per-tick cap, the widget trim and §11's `FakeText` tests all
@@ -549,7 +603,9 @@ makes all of §8 unit-testable.
 3. **Clear `_connected` on socket loss and revive `reconnect()`** — promoted to a prerequisite
    by §6's decision.
 4. `MINIMUM_PWI4_VERSION` moves to `common/const.py`.
-5. Delete `unit/service/`, `common/services/mast-unit/`.
+5. `unit/service/` is already gone. `common/services/mast-unit/` survives #159 with
+   `start_mast_unit.bat` and the logrotate configuration; delete the batch file, and move the
+   logrotate files rather than deleting them if they are still what rotates the daily log.
 
 **Tests that break, all named:** `test_phd2_init_reports_its_cause.py:86-94` and `:139-144`;
 `test_limit_frame_guiding.py:61`. The process-launch guards in both conftests **stay** — their
@@ -559,7 +615,7 @@ rationale ("app.py calls `ensure_process_is_running` at module level") is what c
 and `unit/DECISIONS.md:1246` ("ps3cli health is a startup-time probe, not a supervised
 process"), which this supersedes and whose new entry must say so.
 
-**The developer path** — *decided*: `python -m common.supervisor --gui --no-service --no-app`
+**The developer path** — *decided*: `python -m supervision --gui --no-service --no-app`
 is the supported dev entry point, giving production topology minus the service; the developer
 then runs `python app.py`. No fallback spawning in the app: two owners of a process makes "who
 started this" unanswerable from a log. Pair it with self-explaining errors — *"PWI4 is not
@@ -589,14 +645,19 @@ about where PHD2 is, which is worse than a constant.
 different case and the comment beside them must say so: they are deliberately **not** configurable
 and deliberately **not** a `services` row, for the reason in §7's status-API subsection.
 
-**Where the `ttkbootstrap` requirement goes, if it is adopted: `unit/requirements.txt` and
-`spec/requirements.txt` — not `common/requirements.txt`.** The obvious move is wrong. The code
-lives in `common/`, so the requirement looks like it belongs there; but `common`'s requirements
-are installed on the Linux control host and in the CI image, and ttkbootstrap would drag Pillow
-(which `common` does not currently depend on) onto machines that will never open a window. The
-dependency obeys the same rule as the import (§2): `tkinter` and `ttkbootstrap` are confined to
-`gui.py`, so their requirements are confined to the projects that run a GUI. §7's import-guarded
-fallback to plain `ttk` is what makes that placement safe rather than fragile.
+**Dependencies are declared in MAST_supervision's `pyproject.toml`, not a `requirements.txt`**
+— `[project].dependencies`, a `dev` dependency group, and `[tool.uv] package = false`, since the
+repo is imported through `mast.pth` and never built. `mast-clone` resolves every cloned repo's
+manifest in one `uv pip install`, so the pin rule is: a library another MAST repo also uses
+(fastapi, uvicorn, pydantic, pywin32) takes a **lower bound only** and that repo's exact pin
+decides; a library only this repo uses (`ttkbootstrap`, if adopted) is **pinned exactly**.
+`uv.lock` pins the repo's own CI and dev venvs; the fleet does not read it. A joint resolve of
+MAST_unit's `requirements.txt` with the seed `pyproject.toml` and `--group …:dev` was verified
+under uv 0.11 on 2026-09-24.
+
+This also settles the first draft's `ttkbootstrap` placement question, which existed only
+because the code lived in `common`, whose requirements reach the Linux control host. The
+supervision repo never goes there.
 
 Nothing new in `C:\WIS\config.toml`. Resist adding a `MAST_TOP` env var.
 
@@ -606,7 +667,7 @@ The architectural rule that makes a GUI + service + supervision program testable
 is a pure function of injected probes, an injected clock and a snapshot.** No module reaches for
 `Config()`, `Filer()`, `win32*` or `tkinter` at import time.
 
-New files in `common/tests/`, house style (subclassed fakes, `object.__new__(Config)`, no Mongo,
+New files in `supervision/tests/`, house style (subclassed fakes, `object.__new__(Config)`, no Mongo,
 no hardware): `test_supervisor_resources.py` (all up → ready; one down → waiting, then degraded
 after the budget, **and it proceeds**; a raising probe is "down" and never propagates;
 transitions log once, not per poll), `test_supervisor_index_check.py` (`tmp_path` with 47 files;
@@ -644,8 +705,9 @@ is built from `BASE_SUPERVISOR_PATH` rather than a literal. Separately, assert
 `SUPERVISOR_PORT` is a plain constant and that nothing in the supervisor package calls
 `get_service()` to find it — that is the one invariant a later tidy-up would break silently.
 
-Add `win32process.CreateProcess`/`CreateProcessAsUser` to the denied set in both conftests — the
-guard has a second door now.
+Add `win32process.CreateProcess`/`CreateProcessAsUser` to the denied set in the common and unit
+conftests — the guard has a second door now — and give MAST_supervision's own conftest the same
+guard from its first test.
 
 **Manual acceptance on mast00** (nothing above covers these): `sc start mast-service` → a window
 appears in the interactive session within 30 s; `sc stop` → it goes, with no orphan;
@@ -653,7 +715,7 @@ appears in the interactive session within 30 s; `sc stop` → it goes, with no o
 it reappears in the new session; kill PWI4 by hand → back within ~15 s and the GUI says so;
 reboot → everything comes up with no keystroke; and **`curl http://<unit>:8004/mast/api/v1/supervisor/status`
 from the control machine answers while the unit is still in `WAITING_FOR_RESOURCES`** — which is
-both the endpoint's purpose and the only check that the inbound firewall rule actually landed.
+both the endpoint's purpose and the only end-to-end check that nothing blocks 8004 inbound.
 
 Whichever toolkit §7 settles on, its rendering under `CreateProcessAsUser` with
 `CREATE_NEW_CONSOLE` in an autologon session belongs here too, not in a unit test: whether a
@@ -664,23 +726,25 @@ a console, on whether it is `conhost` or Windows Terminal.
 
 **An interactive session on every machine that runs a supervisor.** The design assumes one:
 without it `WTSQueryUserToken` has nothing to return, the supervisor never starts, and the
-machine is worse off than today. Where the fleet stands is only partly known from here.
+machine is worse off than today.
 
-- **mast00 has no autologon** — verified: `AutoAdminLogon` unset, no `DefaultUserName`, no
-  `DefaultPassword`, and the live `mast` console session was logged on by hand.
-- **That is not evidence about the fleet.** mast00 and mastw are relics that predate
+- **Provisioned units already have it** — verified 2026-09-24 against MAST_provisioning `main`:
+  `client/bootstrap.ps1` configures Winlogon `AutoAdminLogon` for `mast` as a first-touch
+  element (skippable with `-SkipAutoLogon`).
+- **mast00 and mastw do not.** mast00 verified: `AutoAdminLogon` unset, no `DefaultUserName`, no
+  `DefaultPassword`, the live `mast` console session logged on by hand. Both predate
   MAST_provisioning — the same reason mast00's PDU sits at `10.23.1.75` on the units' own VLAN
-  while every provisioned unit's is on `10.23.2.x`. They are scheduled to get autologon, but on
-  no particular date.
-- **Whether provisioned units already have it is unverified.** MAST_provisioning is a sparse
-  checkout on the machine this was written on (top-level files plus `tools/`), so
-  `server/providers/mast/provide-mast.ps1` — the script that configures a deployed unit — could
-  not be read. **Someone with a full checkout should answer this before stage 4**, because it
-  decides whether autologon is a fleet-wide provisioning change or a two-machine catch-up.
+  while every provisioned unit's is on `10.23.2.x`. So autologon is a two-machine catch-up, not
+  a fleet-wide change.
 
-Whoever configures it: recommend Sysinternals `Autologon.exe`, which stores the password as an
-LSA secret rather than as plaintext in `HKLM\…\Winlogon\DefaultPassword`. Screen lock and
-screensaver must also be disabled by policy, or the GUI exists where nobody can see it.
+Not yet checked: whether `bootstrap.ps1` writes the password as plaintext
+`HKLM\…\Winlogon\DefaultPassword` or as an LSA secret. Sysinternals `Autologon.exe` does the
+latter and is the recommendation if it is the former. Screen lock and screensaver must also be
+disabled by policy, or the GUI exists where nobody can see it.
+
+**A superseding MAST_provisioning decision permitting `mast-service`** (§3), with the
+no-registration test and the finalize absence assertion relaxed for that one name. Blocks
+stage 5, not stages 0–3.
 
 **The PHD2 `_connected` fix** (§9.3) — blocking, and unambiguously so. Promoted from follow-up
 to prerequisite by the decision that a PHD2 restart must not restart the app: until it lands, a
@@ -722,25 +786,35 @@ telescope, not a remote-control surface.
 |---|---|---|
 | 0 | common | `common/opmode.py` (the merged opmode plan, stage 1) — prerequisite |
 | 1 | common | `config/supervisor.py`; `const.py` ports + `MINIMUM_PWI4_VERSION` + `SUPERVISOR_PORT` (8004, after the cross-repo grep) + `BASE_SUPERVISOR_PATH`; `find_processes`/`process_session_id`; `init_log` gains `file_leaf`; **a `sites` write path** (`$addToSet`/`$pull` on `units_in_maintenance`) beside `write_unit_delta` |
-| 2 | common | `state.py`, resources, probes, managed, launcher, locate, logsink, gui_model + every test. `--dry-run` prints the resolved plan and exits |
-| 3 | common | `api.py` and the status endpoint; gui (incl. the Actions menu and its modals), supervisor, `__main__`. **Run a night on mast00** as `--gui --no-service --no-app`, supervising PWI4/PHD2/ps3cli while `mast-unit` still runs the app — adoption is what makes two owners safe, and this is the highest-value de-risking step |
-| 4 | prov. | autologon; nssm at a managed path; write `<top>/mast-<role>.code-workspace`; **open 8004 inbound** on each unit; `ttkbootstrap` in `unit`/`spec` requirements if adopted |
-| 5 | common | session, service, installer. Install on mast00 with `mast-unit` stopped but installed — rollback is `sc stop mast-service; sc start mast-unit` |
-| 6 | unit | the §9 deletions and the PHD2 fix; **only now is `mast-unit` removed** |
+| 1a | supervision | the seed: `pyproject.toml`, `uv.lock`, `ruff.toml`, CI (Linux + Windows, paired MAST_common branch), README, DECISIONS, CLAUDE.md, the package-location test |
+| 1b | prov. | `mast-repos.tsv` row (`supervision`, `MAST_supervision`, `unit,spec`, `main`); `mast-clone` accepts `pyproject.toml` — `-r <dir>/pyproject.toml --group <dir>/pyproject.toml:dev` — where a repo has no `requirements.txt` |
+| 2 | supervision | `state.py`, resources, probes, managed, launcher, locate, logsink, gui_model + every test. `--dry-run` prints the resolved plan and exits |
+| 3 | supervision | `api.py` and the status endpoint; gui (incl. the Actions menu and its modals), supervisor, `__main__`. **Run a night on mast00** as `--gui --no-service --no-app`, supervising PWI4/ps3cli and observing PHD2 while the operator runs the app from VSCode — adoption is what makes two owners safe, and this is the highest-value de-risking step |
+| 4 | prov. | autologon on mast00 and mastw; nssm at a managed path; write `<top>/mast-<role>.code-workspace`; the superseding service decision (§3, §12) |
+| 5 | supervision | session, service, installer. Install on mast00 — rollback is `sc stop mast-service` and uninstall, back to today's hand-run app |
+| 6 | unit | the §9 deletions and the PHD2 fix; PHD2 flips from observed to supervised |
 | 7 | spec | mirror stage 6 |
 | 8 | common | delete `WatchedProcess`, `log_stream`, `kill_process_by_name`, and (after a cross-repo grep) `ensure_process_is_running` |
+
+**What can ship before any MAST_unit change: stages 0–5, under `automatic` only.** That is a
+deployable result, not just a shadow run — reboot → autologon → `mast-service` → supervisor →
+resources → PWI4 and ps3cli → VSCode, and the operator presses F5 as today. Two constraints
+hold until MAST_unit catches up:
+
+- **The launcher refuses `controlled`**, loudly, until MAST_unit's opmode stage 3 lands. Before
+  it, the app runs `startup()` unconditionally, so a supervisor-launched app would move hardware
+  on boot. A refusal, not a silent fallback to `automatic`: a unit configured `controlled` that
+  quietly behaves otherwise is the failure the opmode plan's `ValueError` exists to prevent.
+- **PHD2 is observe-only** (§6) until stage 6.
 
 `init_log` gaining `file_leaf` in stage 1 is the fix for the log collision: without it the
 supervisor would write `mast-unit-log.txt`, the same file the app appends to, from a second
 process over SMB, with no PID in the format to tell them apart.
 
-Stage 4's firewall entry is **unverified work, not a formality**: mast00 has no MAST inbound
-rules at all — `netsh` shows none — which is consistent with §12's finding that it predates
-MAST_provisioning, and means this machine cannot tell you whether provisioning opens 8000
-specifically or a range. If it opens only 8000, 8004 needs its own rule on every unit; if a
-range, possibly nothing. Someone with a full MAST_provisioning checkout should answer that
-alongside the autologon question. Until then, `/status` is reachable on the machine and nowhere
-else — which is the one place it is not needed.
+**Port 8004 needs no firewall rule on provisioned units** — verified 2026-09-24: `bootstrap.ps1`'s
+`firewall-off` element disables Windows Firewall on all three profiles, the units sitting behind
+a perimeter firewall on their own VLAN. mast00 predates that element and has no MAST inbound
+rules at all, so check its firewall state by hand before stage 3's `curl` from the control host.
 
 ## Provenance
 
@@ -789,3 +863,36 @@ the first written supervision design in MAST. It is also the only surviving use 
 this program: if that record is ever written, name it `…-supervises-an-interactive-supervisor.md`.
 `mast-monitor` appears nowhere in MAST_common, MAST_unit or mast-claude-config; the other three
 repos were not checked from here.
+
+**Revised 2026-09-24**, fourth round, one decision with Arie and a set of findings from a full
+MAST_provisioning checkout. **The code moves to a new repo, MAST_supervision** (§2), cloned as
+`<top>/supervision/`, with the pieces other programs import staying in MAST_common; its
+dependencies are declared in `pyproject.toml` (§10). The provisioning questions the earlier
+rounds could not answer are now answered: provisioned units already have autologon (§12); Windows
+Firewall is off fleet-wide, so 8004 needs no rule (§15); and no MAST service exists at all since
+MAST_provisioning#159, so there is no `mast-unit` to replace — but that same decision forbids
+registering `mast-service`, and needs superseding in provisioning (§3). §15 now marks what can
+ship before any MAST_unit change (stages 0–5, `automatic` only), with the launcher refusing
+`controlled` and PHD2 observed rather than supervised until MAST_unit catches up (§6).
+
+**Correction to the previous round:** the decision record called dangling above **exists** — in
+MAST_provisioning, not in mast-claude-config:
+`docs/decisions/2026-08-12-one-nssm-service-supervises-an-interactive-monitor.md`, `status:
+proposed`, under MAST_provisioning#82. It is the predecessor of this plan, with the same
+architecture under other names — `mast-watcher` (LocalSystem, session 0, one child) for
+`mast-service`, and `mast-monitor` (the autologon session, owning PWI4 / ps3cli / PHD2 / the unit
+process) for `mast-supervisor` — and the same adopt-don't-respawn rule. It was written before
+MAST_provisioning#159, when the four services still existed. Where the two differ, this plan
+governs only once the difference is decided, and one difference is open:
+
+- **What maintenance does on the machine.** The 08-12 record: a unit in maintenance means the
+  monitor does not spawn or watch the unit process (the GUI applications stay up), and setting
+  and clearing the flag drives the unit through `/shutdown` and `/startup`. This plan (§7):
+  activating maintenance changes nothing on the machine, and standing the unit down is "a
+  behaviour change to specify, not one to assume". **For Arie.**
+
+Its other open items — whether the resource wait is bounded (§5 answers: 300 s, then degrade),
+whether supervision runs independently of the window (§7 answers: workers first, the window may
+fail), and the maintenance flag carrying no who / when / why — are either answered here or
+remain open there. Once this plan lands, the 08-12 record should be marked superseded in
+MAST_provisioning, pointing here.
