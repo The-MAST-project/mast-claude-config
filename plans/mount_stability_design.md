@@ -1568,12 +1568,114 @@ rotates; a calm reading sits near ratio 1 against the §10.2 floors.
 ### 10.12 Still open
 
 - **The 0 % anchor.** Needs windy tracking data. Until then `R` is a chosen number in the
-  5–20 band with a lower bound of ~2.3 established by healthy settling.
+  5–20 band with a lower bound of ~2.3 established by healthy settling. §10.13/F2 is the
+  first windy-night evidence from the hardware, though it reads the pointing channel rather
+  than the current channel: the mount could not hold 0.5″ for two consecutive seconds at any
+  mesh altitude, wandering 0.5–3.8″.
 - **Guiding.** PHD2 corrects continuously during an acquisition. If those corrections reach
   the mount as PWI4 offsets they will move `setpoint_velocity` constantly and the gauge will
   be permanently blank for most of the observing night — which would be fatal to the whole
   idea. If instead PHD2 drives the mount by another path, the corrections appear only in the
   axis telemetry and the gauge measures *residual after guiding*, a different but still
   meaningful quantity. **This was not measured and must be, before Stage 2.** It is the
-  single largest unknown remaining in this design.
+  single largest unknown remaining in this design. Still unmeasured after the first campaign
+  night: §10.13/F2 forfeited the guided dwell of every cell, so no guided telemetry exists
+  yet. Fixing the settle gate is therefore on the critical path to this answer, not a
+  tidy-up.
 - **`Config.set_unit` and the config watcher** (§10.7).
+
+### 10.13 First night on the hardware — 2026-10-01
+
+The campaign ran on mast02 for the first time, in stiff wind, against §8's code. It drove the
+mount, wrote products to the share, and produced real unguided telemetry. It also failed to
+start twice before producing anything, and then forfeited the guided half of every cell. All
+three causes are recorded here because none of them is visible from the data afterwards.
+
+Conditions and setup: altitude floor raised 15 → 35 at the telescope before any cell
+completed (mesh **v2**, see the constants in `stability_campaign.py`); pilot mesh, 10 cells;
+share and MongoDB both reachable, so products went to
+`Z:/MAST/mast02/2026-10-01/Stability/` and config was live rather than cached.
+
+#### F1 — astropy's IERS defaults stopped the mount pointing at all (fixed)
+
+Two start attempts, 2 visits each, **0 completed, mount never moved.** Every visit died in
+`_visit`'s catch-all before its slew:
+
+> interpolating from IERS_Auto using predictive values that are more than 30.0 days old …
+> Perhaps you are offline?
+
+astropy 8.0.1 ships `iers_degraded_accuracy = "error"`, so it **raises** rather than warns
+when it must interpolate Earth-orientation predictions older than `auto_max_age` (30 days),
+and `auto_download = True` makes the only escape a live fetch of `finals2000A.all`. astropy
+reads `HTTP(S)_PROXY` from the process environment; the unit has none, so the fetch goes
+direct and this site's proxy blocks it. **Every alt/az → RA/Dec transform therefore depended
+on network reachability.**
+
+Refreshing the cached table through the proxy was *not* sufficient — the raise is about how
+staleness is **treated**, not about whether a table is present. Fixed in `unit/src/app.py` by
+setting, before any transform: `auto_download = False`, `auto_max_age = None`,
+`iers_degraded_accuracy = "warn"`. Never fetch, never raise, degrade loudly. The accuracy
+given up is UT1-UTC prediction error — tens of milliseconds over the months a cached table
+stays usable, far below this mount's pointing residual, and the science path plate-solves
+anyway.
+
+**This is fleet-wide, not campaign-specific.** Every MAST service that converts coordinates
+has the same exposure. Worth checking whether recent acquisition or solving failures on other
+units share this cause. The setting belongs in `common` once control and spec are confirmed
+to want the same policy.
+
+#### F2 — the 0.5″ settle gate is unreachable in wind, and it costs the guided dwell
+
+Once pointing worked, visits completed — and **every one forfeited its guided half**, with
+`settle.reason = "no room left in the slot for a guided dwell"`. Not a missing star: PHD2 was
+calibrated and never got asked. Where a 210 s slot went (visit 4, slot start 19:41:56Z):
+
+| phase | duration |
+|---|---|
+| slew | **10.5 s** (and 13.1 s on the next cell) — fast, not the problem |
+| dist settle to 0.5″ | **110 s, then TIMEOUT** (limit 120 s) |
+| unguided dwell | 60 s, as designed |
+| left for acquire + guided | **~12 s** → `min(45, 12 − 60) < 0` → forfeited |
+
+`wait_until_settled` was invoked with `tol=0.500" stable_samples=2 grace=3.0s poll=1.0s
+timeout=120s`. In this wind `dist_to_target` wandered **0.5–3.8″** and never gave two
+consecutive in-tolerance samples (`in_tol=0/2` throughout), so the gate could not be
+satisfied and burned its full timeout on every visit.
+
+**The campaign built to measure wind-induced instability was blocked by wind-induced
+instability.** 0.5″ is a *science-pointing* tolerance; for sitting on an alt/az cell while
+recording axis current, a few arcsec of pointing error changes nothing. Campaign slews need
+their own loose tolerance — or simply `is_slewing` cleared plus a short grace.
+`mount.py:479` already carries `TODO: source dist_tolerance_arcsec / stable_samples from
+unit_conf`, which is the hook.
+
+**The timeout is itself a measurement, and it bears on §10.12's 0 % anchor.** The mount could
+not hold 0.5″ for two consecutive seconds at *any* of alt 35/45/65, for four consecutive
+visits, in this wind. That is an independent, if crude, statement of wind response from the
+pointing channel rather than the current channel — and it is the first evidence this campaign
+has produced about the top of the gauge's range. It also implies ordinary science acquisition
+was likely struggling the same way on this night.
+
+#### F3 — a 100 % failure rate is indistinguishable from one bad cell
+
+Twice, with every visit failing, the campaign reported `active: True`, `phase: idle`,
+`cells_skipped: 0` and no escalation anywhere except `last_error`. That is §8's "one bad cell
+must not end the night" working exactly as written — and hiding a total failure. Left
+unattended, the night would have ended with ~240 attempts, zero data, and a mount that never
+moved.
+
+**Wanted: abort after N consecutive failed visits, naming the repeated error.** This is the
+first test `stability_campaign.py` should get — it has none today, at 865 lines.
+
+#### What the night did produce
+
+Unguided telemetry, working as designed: **2700 polls → 2026 distinct samples in 60 s**
+(~33.8 Hz distinct, consistent with §6.1's 44 Hz server-side refresh and the
+`position_timestamp` de-duplication). Four visits completed, 0 skipped, cells 1, 8, 5, 2 —
+the stride-7 rotation visiting without repeats as intended. The slot clock also proved
+itself: the run adopted the epoch already on the share and resumed at visit 3 by elapsed
+time rather than restarting its count.
+
+Decision taken at the telescope: **let it run unguided-only** rather than stop to fix F2
+mid-night. So this night contributes to the servo-only tier and leaves §10.12's guiding
+question — still the single largest unknown — open.
