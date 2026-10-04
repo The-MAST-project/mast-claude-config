@@ -1606,7 +1606,7 @@ completed (mesh **v2**, see the constants in `stability_campaign.py`); pilot mes
 share and MongoDB both reachable, so products went to
 `Z:/MAST/mast02/2026-10-01/Stability/` and config was live rather than cached.
 
-#### F1 — astropy's IERS defaults stopped the mount pointing at all (fixed)
+#### F1 — astropy's IERS defaults stopped the mount pointing at all (fixed; relocation tracked as MAST_common#139)
 
 Two start attempts, 2 visits each, **0 completed, mount never moved.** Every visit died in
 `_visit`'s catch-all before its slew:
@@ -1622,19 +1622,26 @@ direct and this site's proxy blocks it. **Every alt/az → RA/Dec transform ther
 on network reachability.**
 
 Refreshing the cached table through the proxy was *not* sufficient — the raise is about how
-staleness is **treated**, not about whether a table is present. Fixed in `unit/src/app.py` by
+staleness is **treated**, not about whether a table is present. The night was unblocked by
 setting, before any transform: `auto_download = False`, `auto_max_age = None`,
 `iers_degraded_accuracy = "warn"`. Never fetch, never raise, degrade loudly. The accuracy
 given up is UT1-UTC prediction error — tens of milliseconds over the months a cached table
 stays usable, far below this mount's pointing residual, and the science path plate-solves
 anyway.
 
-**This is fleet-wide, not campaign-specific.** Every MAST service that converts coordinates
-has the same exposure. Worth checking whether recent acquisition or solving failures on other
-units share this cause. The setting belongs in `common` once control and spec are confirmed
-to want the same policy.
+**This is fleet-wide, not campaign-specific**, and that is why the inline fix in
+`unit/src/app.py` was subsequently **discarded rather than merged**: `common/config/site.py`'s
+`observing_window()` raises the identical error, and astroplan is reached by every
+`import common.config`, so every MAST service already loads the exposed path. The policy
+belongs in `common`, where MAST_common#139 now specifies it along with a per-machine table
+cache and refresher.
 
-#### F2 — the 0.5″ settle gate is unreachable in wind, and it costs the guided dwell
+**Note the gap this leaves.** Until that lands, nothing applies the policy. The cached table's
+`predictive_mjd` was 2026-10-02, so the 30-day threshold falls around **2026-11-01**, after
+which a campaign night fails exactly as this one did — and per F3 below, it will fail quietly.
+A manual `download_file(IERS_A_URL, cache='update')` through the proxy buys another 30 days.
+
+#### F2 — the 0.5″ settle gate is unreachable in wind, and it costs the guided dwell (MAST_unit#280)
 
 Once pointing worked, visits completed — and **every one forfeited its guided half**, with
 `settle.reason = "no room left in the slot for a guided dwell"`. Not a missing star: PHD2 was
@@ -1666,7 +1673,7 @@ pointing channel rather than the current channel — and it is the first evidenc
 has produced about the top of the gauge's range. It also implies ordinary science acquisition
 was likely struggling the same way on this night.
 
-#### F3 — a 100 % failure rate is indistinguishable from one bad cell
+#### F3 — a 100 % failure rate is indistinguishable from one bad cell (open, untracked)
 
 Twice, with every visit failing, the campaign reported `active: True`, `phase: idle`,
 `cells_skipped: 0` and no escalation anywhere except `last_error`. That is §8's "one bad cell
