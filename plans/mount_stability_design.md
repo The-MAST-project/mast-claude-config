@@ -1614,16 +1614,38 @@ Two start attempts, 2 visits each, **0 completed, mount never moved.** Every vis
 > interpolating from IERS_Auto using predictive values that are more than 30.0 days old …
 > Perhaps you are offline?
 
-astropy 8.0.1 ships `iers_degraded_accuracy = "error"`, so it **raises** rather than warns
-when it must interpolate Earth-orientation predictions older than `auto_max_age` (30 days),
-and `auto_download = True` makes the only escape a live fetch of `finals2000A.all`. astropy
-reads `HTTP(S)_PROXY` from the process environment; the unit has none, so the fetch goes
-direct and this site's proxy blocks it. **Every alt/az → RA/Dec transform therefore depended
-on network reachability.**
+**Corrected 2026-10-04, while implementing MAST_common#139.** This section first blamed the
+site proxy, and named the wrong astropy setting. Both were wrong, and the real account matters
+because the wrong one suggests fixes that would not have worked.
 
-Refreshing the cached table through the proxy was *not* sufficient — the raise is about how
-staleness is **treated**, not about whether a table is present. The night was unblocked by
-setting, before any transform: `auto_download = False`, `auto_max_age = None`,
+*Not the proxy.* These machines reach the IERS data centre with **every** proxy variable
+unset — `urllib.request.getproxies()` reads the WinINET registry settings on Windows, which is
+how a MAST service reaches the internet with no `HTTP(S)_PROXY` in its environment. Verified by
+downloading the table that way on 2026-10-04. (Note the unit actively *deletes* those
+variables at startup so that talking to PWI4 on 127.0.0.1 is not proxied, so anything relying
+on them could never have worked here anyway.)
+
+*What actually happened.* The table **the server was publishing** carried measured values only
+to 2026-07-31. So astropy downloaded successfully, found itself still more than 30 days past
+the last measured value, and raised regardless. **No amount of networking would have kept the
+mount pointing that night** — which is why the fix is a policy and not a refresher, and why
+the two are separate calls in `common.iers_policy`.
+
+*And it is not `iers_degraded_accuracy`.* astropy has two independent checks, governed by
+different settings (read in 8.0.1's `utils/iers/iers.py`):
+
+| check | raises | governed by |
+|---|---|---|
+| `IERS_Auto._check_interpolate_indices` | `ValueError`, time is in the predictive span and `now − predictive_mjd > auto_max_age` | **`auto_max_age` only** — `None` becomes `np.finfo(float).max`, so it can never fire |
+| `IERS._check_interpolate_indices` | `IERSRangeError`, time outside the table entirely | `iers_degraded_accuracy` |
+
+The error above is the **first**, which never consults `iers_degraded_accuracy`. So
+`auto_max_age = None` is what unblocked the night; `"warn"` matters for the *second* check,
+which starts to matter once downloads are off and a cached table ages past the ~1 year of
+predictions it carries.
+
+The night was unblocked by setting, before any transform: `auto_download = False`,
+`auto_max_age = None`,
 `iers_degraded_accuracy = "warn"`. Never fetch, never raise, degrade loudly. The accuracy
 given up is UT1-UTC prediction error — tens of milliseconds over the months a cached table
 stays usable, far below this mount's pointing residual, and the science path plate-solves
@@ -1636,10 +1658,24 @@ anyway.
 belongs in `common`, where MAST_common#139 now specifies it along with a per-machine table
 cache and refresher.
 
-**Note the gap this leaves.** Until that lands, nothing applies the policy. The cached table's
-`predictive_mjd` was 2026-10-02, so the 30-day threshold falls around **2026-11-01**, after
-which a campaign night fails exactly as this one did — and per F3 below, it will fail quietly.
-A manual `download_file(IERS_A_URL, cache='update')` through the proxy buys another 30 days.
+**Note the gap this leaves.** `common.iers_policy` now exists — the policy, the per-machine
+cache under `C:/MAST/iers-cache`, and the refresher — but it has **no callers yet**, so nothing
+applies the policy in a running service. The table fetched on 2026-10-04 has
+`predictive_mjd` 2026-10-02, so the 30-day threshold falls around **2026-11-01**, after which a
+campaign night fails exactly as this one did — and per F3 below, it will fail quietly.
+
+Until the consumers land, the stop-gap is one call per machine:
+
+```python
+from common import iers_policy
+from common.config.local import load_local_config
+iers_policy.fetch_once(load_local_config().iers_cache_dir)
+```
+
+No proxy environment is needed, per the correction above. Note this is deliberately *not*
+`download_file(IERS_A_URL, cache='update')`, which an earlier version of this section
+suggested: that writes astropy's own cache, which has been observed not to serve what it holds
+(see `iers_policy`'s module docstring), so it is not reliably the table a transform will use.
 
 #### F2 — the 0.5″ settle gate is unreachable in wind, and it costs the guided dwell (MAST_unit#280)
 
