@@ -1673,7 +1673,7 @@ pointing channel rather than the current channel — and it is the first evidenc
 has produced about the top of the gauge's range. It also implies ordinary science acquisition
 was likely struggling the same way on this night.
 
-#### F3 — a 100 % failure rate is indistinguishable from one bad cell (open, untracked)
+#### F3 — a 100 % failure rate is indistinguishable from one bad cell (MAST_unit#281)
 
 Twice, with every visit failing, the campaign reported `active: True`, `phase: idle`,
 `cells_skipped: 0` and no escalation anywhere except `last_error`. That is §8's "one bad cell
