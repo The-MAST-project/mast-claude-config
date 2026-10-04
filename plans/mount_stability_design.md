@@ -1571,7 +1571,11 @@ rotates; a calm reading sits near ratio 1 against the §10.2 floors.
   5–20 band with a lower bound of ~2.3 established by healthy settling. §10.13/F2 is the
   first windy-night evidence from the hardware, though it reads the pointing channel rather
   than the current channel: the mount could not hold 0.5″ for two consecutive seconds at any
-  mesh altitude, wandering 0.5–3.8″.
+  mesh altitude, wandering 0.5–3.8″. **§10.14 narrows this from the current channel: σ ran
+  ×7–33 the calm floor at only ~12 km/h, a middling night by §2's ≥15 km/h standard. The
+  5–20 band is therefore too small, and ~30 is a lower bound on `R` rather than a value.**
+  Note this interacts with the load confound below — a floor that varies with pointing makes
+  "×N the floor" ill-defined until that is settled.
 - **Guiding.** PHD2 corrects continuously during an acquisition. If those corrections reach
   the mount as PWI4 offsets they will move `setpoint_velocity` constantly and the gauge will
   be permanently blank for most of the observing night — which would be fatal to the whole
@@ -1582,6 +1586,12 @@ rotates; a calm reading sits near ratio 1 against the §10.2 floors.
   night: §10.13/F2 forfeited the guided dwell of every cell, so no guided telemetry exists
   yet. Fixing the settle gate is therefore on the critical path to this answer, not a
   tidy-up.
+- **Which statistic the gauge reads, and against what floor.** Opened by §10.14: σ of axis0
+  current is confounded by axis load (σ/|median current| spans 16× across pointings) badly
+  enough that one cell in thirteen inverts the correlation with servo error, −0.22 → +0.62;
+  and only the *declination* axis responds to wind speed (+0.64, p~0.01) while the RA axis is
+  flat. §10.1's "σ of each axis's current" and §10.7's single global floor both assume what
+  the first night disproves. **Blocks Stage 2's floor work** — tracked as MAST_unit#279.
 - **`Config.set_unit` and the config watcher** (§10.7).
 
 ### 10.13 First night on the hardware — 2026-10-01
@@ -1679,3 +1689,149 @@ time rather than restarting its count.
 Decision taken at the telescope: **let it run unguided-only** rather than stop to fix F2
 mid-night. So this night contributes to the servo-only tier and leaves §10.12's guiding
 question — still the single largest unknown — open.
+
+### 10.14 First results — the 13 unguided dwells, joined to wind
+
+§10.13 records why the night was half-lost. This section is what the surviving half says. **It is
+one pilot night, n=13 dwells, 26,503 samples, every dwell tracking and none slewing.** Nothing
+here is established; two things are strong enough to act on.
+
+#### The wind source
+
+MAST records no wind of its own (§10.13 notes `meta.json` has no weather field; the 13 mentions
+of "wind" in `stability_campaign.py` are all commentary). The join used was
+**`sensors.davis` in the `last_operational` PostgreSQL DB on 10.23.1.25** — LAST's database,
+but sampled by a service *we* wrote (`github.com/blumzi/WAO_Safety`), so it is ours to change.
+Credentials belong in config, not here.
+
+Three properties of that record, established from the data and confirmed against the sampler
+source, because they bound everything below:
+
+- **`tstamp` is UTC.** Verified independently of the schema: `solar_radiation` reaches 0 between
+  15:00 and 16:00, matching that date's 15:40 UTC sunset rather than the 18:40 local one.
+- **1-minute cadence** (`interval = 60` in `config/safety.toml`, per-station configurable).
+- **Resolution is 1 mph = 1.609 km/h.** `vantage_pro2.py` reads `wind_speed_mph = packet[14]`,
+  a single byte of a LOOP1 packet. Every value in the DB is an exact multiple of 1 mph.
+
+**No gust is recorded, and that is a packet choice rather than a station limit.** The driver sends
+`LOOP 1`; the 10-min gust, the 2-min and 10-min averages (all at 0.1 mph) and the gust bearing
+live in LOOP2 (`LPS 2 1`). LOOP1 byte 15 already carries a 10-min average that goes unread. The
+gust field is a rolling peak maintained by the station, so **capturing gusts needs the packet, not
+a faster cadence** — 60 s stays adequate if LOOP2 is adopted, and is far too slow if it is not.
+For a 60 s dwell the **2-minute average is the better covariate** than the 10-min gust, whose
+window would attribute a gust eight minutes earlier to the dwell.
+
+#### Conditions: moderate, not stiff — which makes the range finding worse
+
+Instantaneous 4.8–17.7 km/h; dwell means 10.2–14.5; median 12.9. **§2's "windy" threshold is
+≥15 km/h hourly mean, so this was a middling night.** Bearing was remarkably steady all night at
+~265° (WSW, spread 250–296°), which makes `|az − wind bearing|` read cleanly as azimuth measured
+from upwind: rel ≈ 0 pointing *into* the wind, rel ≈ 180 downwind.
+
+This sharpens §10.13's `R` finding rather than softening it. Those ×10–33 floor ratios were
+obtained at ~12 km/h. **`R` in §10.12's "5–20 band" is not merely uncertain, it is too small**, and
+30 is a lower bound on the estimate, not a value. A 25 km/h night either exceeds it substantially
+or the response saturates; both are things the gauge scale has to know.
+
+#### Correction to §10.13: the stride DID decorrelate azimuth from hour
+
+§10.13 and the first reading of this data both assumed 1.3 passes could not separate azimuth from
+the hour. **That was wrong, and it is worth recording because it vindicates `TRAVERSAL_STRIDE`:**
+
+| | r |
+|---|---|
+| azimuth vs minutes elapsed | **−0.02** |
+| relative bearing vs minutes elapsed | **−0.11** |
+| wind speed vs minutes elapsed | −0.60 |
+
+Azimuth is essentially orthogonal to the hour after 13 visits. What drifts with the hour is wind
+*speed* (§2.2's evening decay) — a covariate, controllable, not a confound in the azimuth channel.
+
+#### R1 — the core hypothesis is visible, with the right sign, and strengthens under control
+
+Servo error (axis0 RMS) against relative bearing:
+
+| | r | p |
+|---|---|---|
+| raw | −0.44 | ~0.11 |
+| controlling wind speed | −0.49 | ~0.07 |
+| controlling wind speed **and** hour | **−0.52** | **~0.06** |
+
+| bearing bin | n | servo-err RMS | mean wind |
+|---|---|---|---|
+| into wind (0–60°) | 5 | **1.947″** | 12.2 |
+| broadside (60–120°) | 5 | 1.778″ | 12.1 |
+| downwind (120–180°) | 3 | **1.293″** | 13.0 |
+
+Monotonic, ~1.5× from downwind to upwind, and the downwind bin had *more* wind, so it is not a
+speed artefact. At n=13, p~0.06 is **suggestive, not significant** — but an effect that grows as
+confounds are removed is behaving as a real one. This is the first evidence that what the campaign
+exists to measure is measurable at all.
+
+#### R2 — the gauge is reading the wrong axis
+
+Against wind speed, controlling for relative bearing:
+
+| | r | p |
+|---|---|---|
+| σ **axis1** (current) | **+0.64** | **~0.01** |
+| σ axis0 (current) | −0.09 | ~0.77 |
+| servo-error RMS | +0.35 | ~0.24 |
+
+axis0 carried a constant 4.1725e-3 deg/s setpoint — sidereal to four figures — and axis1's median
+setpoint was 0, so axis0 is the RA/HA axis and axis1 declination. **Declination-axis current
+tracks wind speed; the RA axis does not.** And it does so across a lever of only 1.42× in speed,
+itself under three quantisation steps wide.
+
+§10.1 proposes one gauge from "the rolling standard deviation of each axis's
+`measured_current_amps`". On this evidence the two axes are not interchangeable inputs, and
+pooling them dilutes the only channel that responds.
+
+#### R3 — σ(current) is confounded by axis load badly enough to invert the ranking
+
+The night's **largest** σ(axis0 current) — 0.142 A, ×23.8 the calm floor — came from visit 10
+(alt 35, az 18), which was also:
+
+- the **calmest** dwell (10.2 km/h mean, gust 11.3, jointly lowest), and
+- the **best-pointing** dwell by a wide margin (servo-error RMS 0.438″, against 1.15–2.56″
+  everywhere else).
+
+Calmest wind, best pointing, worst current σ. Its median axis0 current was −0.20 A — near zero,
+i.e. near the **gravitational balance point where axis torque reverses sign**. The distribution is
+a broad single mode (std/MAD ≈ 1.08), so this is not the hysteretic switching §10.3 saw. Relative
+current noise σ/|median current| runs **0.044 at 1.08 A of load up to 0.706 at 0.20 A — a 16×
+spread driven by where the axis sits, not by weather.**
+
+The consequence for the headline relationship is not subtle. σ(axis0 current) vs servo-error RMS
+across the 13 dwells:
+
+| | r |
+|---|---|
+| all 13 | **−0.22** |
+| without visit 10 | **+0.62** |
+
+**One cell in thirteen inverts the sign.** §10.7's single learned global floor cannot be right:
+the floor is a function of pointing, because the load is. Either the floor becomes per-cell, or σ
+is normalised by |median current|, or the gauge reads servo error instead. This needs deciding
+before Stage 2 builds the floor, which is why it is an issue and not a footnote.
+
+It also retrospectively strengthens §10.1's refusal to publish a `stable` boolean: a threshold on
+this statistic would have called the night's steadiest pointing its least stable.
+
+#### R4 — no altitude effect is resolvable, in either direction
+
+axis0 favours alt 35 (×12.0 vs ×10.8 floor), axis1 favours alt 65 (×17.5 vs ×14.5), and servo
+error is slightly *worse* at alt 65 (median 1.62″ vs 1.05″) — the opposite of the wind hypothesis.
+With n=6 and n=7 against this scatter, none of it means anything. Consistent with the warning
+recorded beside `MESH_ALTITUDES_DEGS`: raising the floor to 35 weakened the lever.
+
+#### What this night cannot say, and what would fix it
+
+- **Speed law.** The lever was 10.2–14.5 km/h, 1.42×, under three quantisation steps. Needs calm
+  *and* windy nights — §2.4's 21:00 predictor exists for this — plus LOOP2's 0.1 mph fields.
+- **Bearing as a covariate distinct from azimuth.** One bearing (~265°) all night. Needs nights
+  with different bearings, as §6 anticipated.
+- **Anything guided.** Zero guided dwells (§10.13/F2), so §10.12's PHD2 question is untouched.
+- **Self-contained products.** The wind join lives outside MAST. The campaign should write the
+  joined wind into `meta.json` at visit time, so a run's products stand on their own rather than
+  depending on another project's DB remaining queryable.
