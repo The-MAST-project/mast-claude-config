@@ -1568,12 +1568,277 @@ rotates; a calm reading sits near ratio 1 against the §10.2 floors.
 ### 10.12 Still open
 
 - **The 0 % anchor.** Needs windy tracking data. Until then `R` is a chosen number in the
-  5–20 band with a lower bound of ~2.3 established by healthy settling.
+  5–20 band with a lower bound of ~2.3 established by healthy settling. §10.13/F2 is the
+  first windy-night evidence from the hardware, though it reads the pointing channel rather
+  than the current channel: the mount could not hold 0.5″ for two consecutive seconds at any
+  mesh altitude, wandering 0.5–3.8″. **§10.14 narrows this from the current channel: σ ran
+  ×7–33 the calm floor at only ~12 km/h, a middling night by §2's ≥15 km/h standard. The
+  5–20 band is therefore too small, and ~30 is a lower bound on `R` rather than a value.**
+  Note this interacts with the load confound below — a floor that varies with pointing makes
+  "×N the floor" ill-defined until that is settled.
 - **Guiding.** PHD2 corrects continuously during an acquisition. If those corrections reach
   the mount as PWI4 offsets they will move `setpoint_velocity` constantly and the gauge will
   be permanently blank for most of the observing night — which would be fatal to the whole
   idea. If instead PHD2 drives the mount by another path, the corrections appear only in the
   axis telemetry and the gauge measures *residual after guiding*, a different but still
   meaningful quantity. **This was not measured and must be, before Stage 2.** It is the
-  single largest unknown remaining in this design.
+  single largest unknown remaining in this design. Still unmeasured after the first campaign
+  night: §10.13/F2 forfeited the guided dwell of every cell, so no guided telemetry exists
+  yet. Fixing the settle gate is therefore on the critical path to this answer, not a
+  tidy-up.
+- **Which statistic the gauge reads, and against what floor.** Opened by §10.14: σ of axis0
+  current is confounded by axis load (σ/|median current| spans 16× across pointings) badly
+  enough that one cell in thirteen inverts the correlation with servo error, −0.22 → +0.62;
+  and only the *declination* axis responds to wind speed (+0.64, p~0.01) while the RA axis is
+  flat. §10.1's "σ of each axis's current" and §10.7's single global floor both assume what
+  the first night disproves. **Blocks Stage 2's floor work** — tracked as MAST_unit#279.
 - **`Config.set_unit` and the config watcher** (§10.7).
+
+### 10.13 First night on the hardware — 2026-10-01
+
+The campaign ran on mast02 for the first time, in stiff wind, against §8's code. It drove the
+mount, wrote products to the share, and produced real unguided telemetry. It also failed to
+start twice before producing anything, and then forfeited the guided half of every cell. All
+three causes are recorded here because none of them is visible from the data afterwards.
+
+Conditions and setup: altitude floor raised 15 → 35 at the telescope before any cell
+completed (mesh **v2**, see the constants in `stability_campaign.py`); pilot mesh, 10 cells;
+share and MongoDB both reachable, so products went to
+`Z:/MAST/mast02/2026-10-01/Stability/` and config was live rather than cached.
+
+#### F1 — astropy's IERS defaults stopped the mount pointing at all (fixed; relocation tracked as MAST_common#139)
+
+Two start attempts, 2 visits each, **0 completed, mount never moved.** Every visit died in
+`_visit`'s catch-all before its slew:
+
+> interpolating from IERS_Auto using predictive values that are more than 30.0 days old …
+> Perhaps you are offline?
+
+astropy 8.0.1 ships `iers_degraded_accuracy = "error"`, so it **raises** rather than warns
+when it must interpolate Earth-orientation predictions older than `auto_max_age` (30 days),
+and `auto_download = True` makes the only escape a live fetch of `finals2000A.all`. astropy
+reads `HTTP(S)_PROXY` from the process environment; the unit has none, so the fetch goes
+direct and this site's proxy blocks it. **Every alt/az → RA/Dec transform therefore depended
+on network reachability.**
+
+Refreshing the cached table through the proxy was *not* sufficient — the raise is about how
+staleness is **treated**, not about whether a table is present. The night was unblocked by
+setting, before any transform: `auto_download = False`, `auto_max_age = None`,
+`iers_degraded_accuracy = "warn"`. Never fetch, never raise, degrade loudly. The accuracy
+given up is UT1-UTC prediction error — tens of milliseconds over the months a cached table
+stays usable, far below this mount's pointing residual, and the science path plate-solves
+anyway.
+
+**This is fleet-wide, not campaign-specific**, and that is why the inline fix in
+`unit/src/app.py` was subsequently **discarded rather than merged**: `common/config/site.py`'s
+`observing_window()` raises the identical error, and astroplan is reached by every
+`import common.config`, so every MAST service already loads the exposed path. The policy
+belongs in `common`, where MAST_common#139 now specifies it along with a per-machine table
+cache and refresher.
+
+**Note the gap this leaves.** Until that lands, nothing applies the policy. The cached table's
+`predictive_mjd` was 2026-10-02, so the 30-day threshold falls around **2026-11-01**, after
+which a campaign night fails exactly as this one did — and per F3 below, it will fail quietly.
+A manual `download_file(IERS_A_URL, cache='update')` through the proxy buys another 30 days.
+
+#### F2 — the 0.5″ settle gate is unreachable in wind, and it costs the guided dwell (MAST_unit#280)
+
+Once pointing worked, visits completed — and **every one forfeited its guided half**, with
+`settle.reason = "no room left in the slot for a guided dwell"`. Not a missing star: PHD2 was
+calibrated and never got asked. Where a 210 s slot went (visit 4, slot start 19:41:56Z):
+
+| phase | duration |
+|---|---|
+| slew | **10.5 s** (and 13.1 s on the next cell) — fast, not the problem |
+| dist settle to 0.5″ | **110 s, then TIMEOUT** (limit 120 s) |
+| unguided dwell | 60 s, as designed |
+| left for acquire + guided | **~12 s** → `min(45, 12 − 60) < 0` → forfeited |
+
+`wait_until_settled` was invoked with `tol=0.500" stable_samples=2 grace=3.0s poll=1.0s
+timeout=120s`. In this wind `dist_to_target` wandered **0.5–3.8″** and never gave two
+consecutive in-tolerance samples (`in_tol=0/2` throughout), so the gate could not be
+satisfied and burned its full timeout on every visit.
+
+**The campaign built to measure wind-induced instability was blocked by wind-induced
+instability.** 0.5″ is a *science-pointing* tolerance; for sitting on an alt/az cell while
+recording axis current, a few arcsec of pointing error changes nothing. Campaign slews need
+their own loose tolerance — or simply `is_slewing` cleared plus a short grace.
+`mount.py:479` already carries `TODO: source dist_tolerance_arcsec / stable_samples from
+unit_conf`, which is the hook.
+
+**The timeout is itself a measurement, and it bears on §10.12's 0 % anchor.** The mount could
+not hold 0.5″ for two consecutive seconds at *any* of alt 35/45/65, for four consecutive
+visits, in this wind. That is an independent, if crude, statement of wind response from the
+pointing channel rather than the current channel — and it is the first evidence this campaign
+has produced about the top of the gauge's range. It also implies ordinary science acquisition
+was likely struggling the same way on this night.
+
+#### F3 — a 100 % failure rate is indistinguishable from one bad cell (open, untracked)
+
+Twice, with every visit failing, the campaign reported `active: True`, `phase: idle`,
+`cells_skipped: 0` and no escalation anywhere except `last_error`. That is §8's "one bad cell
+must not end the night" working exactly as written — and hiding a total failure. Left
+unattended, the night would have ended with ~240 attempts, zero data, and a mount that never
+moved.
+
+**Wanted: abort after N consecutive failed visits, naming the repeated error.** This is the
+first test `stability_campaign.py` should get — it has none today, at 865 lines.
+
+#### What the night did produce
+
+Unguided telemetry, working as designed: **2700 polls → 2026 distinct samples in 60 s**
+(~33.8 Hz distinct, consistent with §6.1's 44 Hz server-side refresh and the
+`position_timestamp` de-duplication). Four visits completed, 0 skipped, cells 1, 8, 5, 2 —
+the stride-7 rotation visiting without repeats as intended. The slot clock also proved
+itself: the run adopted the epoch already on the share and resumed at visit 3 by elapsed
+time rather than restarting its count.
+
+Decision taken at the telescope: **let it run unguided-only** rather than stop to fix F2
+mid-night. So this night contributes to the servo-only tier and leaves §10.12's guiding
+question — still the single largest unknown — open.
+
+### 10.14 First results — the 13 unguided dwells, joined to wind
+
+§10.13 records why the night was half-lost. This section is what the surviving half says. **It is
+one pilot night, n=13 dwells, 26,503 samples, every dwell tracking and none slewing.** Nothing
+here is established; two things are strong enough to act on.
+
+#### The wind source
+
+MAST records no wind of its own (§10.13 notes `meta.json` has no weather field; the 13 mentions
+of "wind" in `stability_campaign.py` are all commentary). The join used was
+**`sensors.davis` in the `last_operational` PostgreSQL DB on 10.23.1.25** — LAST's database,
+but sampled by a service *we* wrote (`github.com/blumzi/WAO_Safety`), so it is ours to change.
+Credentials belong in config, not here.
+
+Three properties of that record, established from the data and confirmed against the sampler
+source, because they bound everything below:
+
+- **`tstamp` is UTC.** Verified independently of the schema: `solar_radiation` reaches 0 between
+  15:00 and 16:00, matching that date's 15:40 UTC sunset rather than the 18:40 local one.
+- **1-minute cadence** (`interval = 60` in `config/safety.toml`, per-station configurable).
+- **Resolution is 1 mph = 1.609 km/h.** `vantage_pro2.py` reads `wind_speed_mph = packet[14]`,
+  a single byte of a LOOP1 packet. Every value in the DB is an exact multiple of 1 mph.
+
+**No gust is recorded, and that is a packet choice rather than a station limit.** The driver sends
+`LOOP 1`; the 10-min gust, the 2-min and 10-min averages (all at 0.1 mph) and the gust bearing
+live in LOOP2 (`LPS 2 1`). LOOP1 byte 15 already carries a 10-min average that goes unread. The
+gust field is a rolling peak maintained by the station, so **capturing gusts needs the packet, not
+a faster cadence** — 60 s stays adequate if LOOP2 is adopted, and is far too slow if it is not.
+For a 60 s dwell the **2-minute average is the better covariate** than the 10-min gust, whose
+window would attribute a gust eight minutes earlier to the dwell.
+
+#### Conditions: moderate, not stiff — which makes the range finding worse
+
+Instantaneous 4.8–17.7 km/h; dwell means 10.2–14.5; median 12.9. **§2's "windy" threshold is
+≥15 km/h hourly mean, so this was a middling night.** Bearing was remarkably steady all night at
+~265° (WSW, spread 250–296°), which makes `|az − wind bearing|` read cleanly as azimuth measured
+from upwind: rel ≈ 0 pointing *into* the wind, rel ≈ 180 downwind.
+
+This sharpens §10.13's `R` finding rather than softening it. Those ×10–33 floor ratios were
+obtained at ~12 km/h. **`R` in §10.12's "5–20 band" is not merely uncertain, it is too small**, and
+30 is a lower bound on the estimate, not a value. A 25 km/h night either exceeds it substantially
+or the response saturates; both are things the gauge scale has to know.
+
+#### Correction to §10.13: the stride DID decorrelate azimuth from hour
+
+§10.13 and the first reading of this data both assumed 1.3 passes could not separate azimuth from
+the hour. **That was wrong, and it is worth recording because it vindicates `TRAVERSAL_STRIDE`:**
+
+| | r |
+|---|---|
+| azimuth vs minutes elapsed | **−0.02** |
+| relative bearing vs minutes elapsed | **−0.11** |
+| wind speed vs minutes elapsed | −0.60 |
+
+Azimuth is essentially orthogonal to the hour after 13 visits. What drifts with the hour is wind
+*speed* (§2.2's evening decay) — a covariate, controllable, not a confound in the azimuth channel.
+
+#### R1 — the core hypothesis is visible, with the right sign, and strengthens under control
+
+Servo error (axis0 RMS) against relative bearing:
+
+| | r | p |
+|---|---|---|
+| raw | −0.44 | ~0.11 |
+| controlling wind speed | −0.49 | ~0.07 |
+| controlling wind speed **and** hour | **−0.52** | **~0.06** |
+
+| bearing bin | n | servo-err RMS | mean wind |
+|---|---|---|---|
+| into wind (0–60°) | 5 | **1.947″** | 12.2 |
+| broadside (60–120°) | 5 | 1.778″ | 12.1 |
+| downwind (120–180°) | 3 | **1.293″** | 13.0 |
+
+Monotonic, ~1.5× from downwind to upwind, and the downwind bin had *more* wind, so it is not a
+speed artefact. At n=13, p~0.06 is **suggestive, not significant** — but an effect that grows as
+confounds are removed is behaving as a real one. This is the first evidence that what the campaign
+exists to measure is measurable at all.
+
+#### R2 — the gauge is reading the wrong axis
+
+Against wind speed, controlling for relative bearing:
+
+| | r | p |
+|---|---|---|
+| σ **axis1** (current) | **+0.64** | **~0.01** |
+| σ axis0 (current) | −0.09 | ~0.77 |
+| servo-error RMS | +0.35 | ~0.24 |
+
+axis0 carried a constant 4.1725e-3 deg/s setpoint — sidereal to four figures — and axis1's median
+setpoint was 0, so axis0 is the RA/HA axis and axis1 declination. **Declination-axis current
+tracks wind speed; the RA axis does not.** And it does so across a lever of only 1.42× in speed,
+itself under three quantisation steps wide.
+
+§10.1 proposes one gauge from "the rolling standard deviation of each axis's
+`measured_current_amps`". On this evidence the two axes are not interchangeable inputs, and
+pooling them dilutes the only channel that responds.
+
+#### R3 — σ(current) is confounded by axis load badly enough to invert the ranking
+
+The night's **largest** σ(axis0 current) — 0.142 A, ×23.8 the calm floor — came from visit 10
+(alt 35, az 18), which was also:
+
+- the **calmest** dwell (10.2 km/h mean, gust 11.3, jointly lowest), and
+- the **best-pointing** dwell by a wide margin (servo-error RMS 0.438″, against 1.15–2.56″
+  everywhere else).
+
+Calmest wind, best pointing, worst current σ. Its median axis0 current was −0.20 A — near zero,
+i.e. near the **gravitational balance point where axis torque reverses sign**. The distribution is
+a broad single mode (std/MAD ≈ 1.08), so this is not the hysteretic switching §10.3 saw. Relative
+current noise σ/|median current| runs **0.044 at 1.08 A of load up to 0.706 at 0.20 A — a 16×
+spread driven by where the axis sits, not by weather.**
+
+The consequence for the headline relationship is not subtle. σ(axis0 current) vs servo-error RMS
+across the 13 dwells:
+
+| | r |
+|---|---|
+| all 13 | **−0.22** |
+| without visit 10 | **+0.62** |
+
+**One cell in thirteen inverts the sign.** §10.7's single learned global floor cannot be right:
+the floor is a function of pointing, because the load is. Either the floor becomes per-cell, or σ
+is normalised by |median current|, or the gauge reads servo error instead. This needs deciding
+before Stage 2 builds the floor, which is why it is an issue and not a footnote.
+
+It also retrospectively strengthens §10.1's refusal to publish a `stable` boolean: a threshold on
+this statistic would have called the night's steadiest pointing its least stable.
+
+#### R4 — no altitude effect is resolvable, in either direction
+
+axis0 favours alt 35 (×12.0 vs ×10.8 floor), axis1 favours alt 65 (×17.5 vs ×14.5), and servo
+error is slightly *worse* at alt 65 (median 1.62″ vs 1.05″) — the opposite of the wind hypothesis.
+With n=6 and n=7 against this scatter, none of it means anything. Consistent with the warning
+recorded beside `MESH_ALTITUDES_DEGS`: raising the floor to 35 weakened the lever.
+
+#### What this night cannot say, and what would fix it
+
+- **Speed law.** The lever was 10.2–14.5 km/h, 1.42×, under three quantisation steps. Needs calm
+  *and* windy nights — §2.4's 21:00 predictor exists for this — plus LOOP2's 0.1 mph fields.
+- **Bearing as a covariate distinct from azimuth.** One bearing (~265°) all night. Needs nights
+  with different bearings, as §6 anticipated.
+- **Anything guided.** Zero guided dwells (§10.13/F2), so §10.12's PHD2 question is untouched.
+- **Self-contained products.** The wind join lives outside MAST. The campaign should write the
+  joined wind into `meta.json` at visit time, so a run's products stand on their own rather than
+  depending on another project's DB remaining queryable.
