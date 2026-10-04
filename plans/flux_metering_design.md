@@ -1158,3 +1158,94 @@ per-frame detection. Log the per-frame time once per run so it stays visible.
 The annulus background, `--k-fwhm` scaling, plotting, and the pandas batch path.
 `measure_fwhm` stays a diagnostic: the radius is fixed precisely so the flux does not depend
 on a measured width.
+
+---
+
+## 19. What the swap actually found
+
+§18 was written from one run. This is what happened when it was built and then measured
+against every flux-metering run on the share — 12 measurable runs, 317 steps, 2026-09-14.
+
+### 19.1 The disagreement is the rule, not one bad night
+
+```
+run                          steps    terminal    plain argmax  aperture argmax  agree   bkg drift  fallback
+2026-09-01/FluxMetering/0003    10      failed          (0, 0)           (0, 0)    yes      10,857         0
+2026-09-01/FluxMetering/0004    10   max_rings   nothing measurable
+2026-09-02/FluxMetering/0001    96     aborted          (5, 4)           (5, 3)     NO   1,601,976         0
+2026-09-02/FluxMetering/0003    45     aborted         (0, -2)         (-1, -2)     NO   1,510,645        19
+2026-09-02/FluxMetering/0004    24     aborted         (-2, 1)           (1, 0)     NO      60,152         5
+2026-09-02/FluxMetering/0005    23     aborted          (1, 1)           (1, 1)    yes      52,733         0
+2026-09-02/FluxMetering/0006    23     aborted         (-1, 2)           (0, 0)     NO     121,135         1
+2026-09-08/FluxMetering/0002    10  max_radius          (1, 1)           (1, 1)    yes      45,570         2
+2026-09-08/FluxMetering/0003    10  max_radius         (-1, 0)         (-1, -1)     NO      12,827         4
+2026-09-08/FluxMetering/0004    10  max_radius   nothing measurable
+2026-09-08/FluxMetering/0005    10   converged          (0, 0)           (0, 0)    yes      18,107         0
+2026-09-08/FluxMetering/0006    26   max_rings          (2, 2)          (-1, 1)     NO   1,552,802         0
+2026-09-08/FluxMetering/0007    10   max_rings          (1, 1)          (-1, 1)     NO   1,567,235         0
+2026-09-08/FluxMetering/0008    10   max_rings         (1, -1)           (1, 1)     NO   1,569,938         0
+```
+
+`bkg drift` is (max - min) of the measured background across the run, times the 1,555,200
+pixels of the frame: the number of counts the old whole-frame sum absorbed from the sky
+alone.
+
+**The two methods pick a different cell in 8 of the 12 measurable runs.** §18.2's finding
+was not one dawn-affected night.
+
+### 19.2 The drift column says which runs are affected, and it is not subtle
+
+Agreement comes with small drift -- 10,857 / 18,107 / 45,570 / 52,733 counts. Disagreement
+comes with large drift -- 1.51M to 1.60M on five of the eight. That is not a correlation to
+interpret: the plain sum's error **is** the drift, so when the background holds still the
+two agree and when it moves by a million counts the sum follows it.
+
+`2026-09-08/0006`, `0007` and `0008` all sit at ~1.55M. Same night, same conditions, same
+failure, three times.
+
+**The most telling row is `2026-09-08/0005`** -- the only run that reached `converged`, which
+is the stopping rule's own statement that it found a peak rather than ran out of rings.
+Drift 18,107, and the two methods agree on (0, 0). The runs that converged are the runs the
+background left alone.
+
+### 19.3 Two runs measure nothing at all
+
+`2026-09-01/0004` and `2026-09-08/0004`: no step could be measured, so every `flux` is None
+and there is no arg-max. Under the plain sum both produced a confident answer computed
+entirely from background. This is what the None-vs-zero distinction (§18.3) exists for, and
+it fires on 2 of 14 runs.
+
+### 19.4 The design missed how the backend fails
+
+§18.3 assumed our fallback would take over when `measure_single_image` raises. **It often
+does not raise.** When segmentation finds nothing it falls back INTERNALLY to a smoothed
+peak search and returns successfully -- and `detect_method` still reads `segment`. No field
+in the result says it happened; the only trace is a line printed to stdout.
+
+On step 22 of run 0006 that returned a hot pixel at (943, 162), FWHM 1.1 px, as **1338
+counts of fibre** -- while another exposure of the same step measured the real thing at
+92666. The first implementation of `measure_frame` caught only the raise and therefore
+accepted the spike exactly as the old code would have.
+
+So a detection is now checked for plausibility, and **two tests are needed, not one**:
+
+- **too narrow** -- FWHM below 3 px, which is the backend's own figure for "too concentrated
+  to be real" (`SPIKE_PEAK_FRACTION`'s comment), applied to every path rather than only to
+  segmentation;
+- **too concentrated** -- more than `SPIKE_PEAK_FRACTION` of the light in one pixel.
+
+Width alone is not enough: on a frame with no noise `measure_fwhm` finds no positive peak
+above the background and returns the CONFIGURED GUESS of 11 px, which clears any width
+floor. Concentration alone was never tried in isolation, but width is what catches the real
+0006 frame, where noise lets the width measurement work. Each covers the other's blind spot.
+
+### 19.5 Corrections to §18
+
+- **§18.2's "the plain sum was measuring dawn"** holds, but understates it. Dawn explains
+  0006; the same mechanism, with no dawn involved, affects two thirds of all runs.
+- **§18.8's step ordering was right but its step 1 was moot**: the file was already tracked,
+  having been swept into an unrelated commit about `SolverId` imports. Its provenance still
+  lives only in this document.
+- **The cost estimate was wrong twice.** §18 first said ~520 ms/frame from the script's own
+  note, then measured 1500 ms. The test suite went from 3:00 to 5:11 as a result, and CI
+  with it.
