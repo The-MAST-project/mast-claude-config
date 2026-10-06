@@ -41,7 +41,18 @@ than loose dictionaries — the same models used for MongoDB serialisation.
 (`common/canonical.py`), so callers have a single unwrapping path regardless of endpoint.
 
 **Global authentication.** Applied as a FastAPI dependency rather than per-route decoration,
-with a public router carved out for `/health` and documentation endpoints.
+with a public router carved out for `/health` and documentation endpoints. Not yet implemented on
+any host (#45).
+
+**Access model (team decision, 2026-10-06).** The Django GUI is the sole source of truth for
+MAST users and permissions, internal and external. A user's request goes browser → GUI → backend:
+the GUI authenticates the user and checks the permission, then makes the backend call itself.
+Backends authenticate the caller by API key and hold no user or permission data of their own.
+Engineers and operators hold personal keys for direct calls; that route is an exception for
+maintaining and running the system, not the normal one. Browser-to-backend calls that bypass the
+GUI are being retired, and the GUI's permission layer is to be rebuilt as a shell over the
+backends. The Mongo `users` / `groups` config collections carry no permissions and are being
+removed ([MAST_common#146](https://github.com/The-MAST-project/MAST_common/issues/146)).
 
 **Proxy transparency.** Endpoints must behave identically whether addressed directly or through
 the nginx reverse proxy.
@@ -52,7 +63,7 @@ The CanonicalResponse envelope is invariant 4 of #42, remediated in
 (PR stack #68 → #69 → #70, plus #73 and #74); it is not yet uniform on the unit, which is what
 #47 exists to fix. Global authentication is
 [#45 API authentication / authorization layer](https://github.com/The-MAST-project/MAST_unit.2024-12-12/issues/45),
-parked. Enforcement of all of the above lives in
+parked; the access model above is the frame it implements. Enforcement of all of the above lives in
 [#52 Contract + regression pytest suite](https://github.com/The-MAST-project/MAST_unit.2024-12-12/issues/52).
 
 ---
@@ -233,6 +244,9 @@ flag at its next checkpoint and unwinding.
    `status`? (Section 3, guideline 4)
 3. Should long-duration endpoints return `202` rather than `200` on acceptance?
 4. What is the recovery procedure for hardware resources left claimed by a host restart?
+5. Within the access model (§2): how does the GUI authenticate to the backends, where are API
+   keys issued, stored and rotated, and does a personal key carry its holder's Django permissions
+   or grant full access?
 
 *Status of each, unit side (2026-08-03):*
 
@@ -252,6 +266,7 @@ flag at its next checkpoint and unwinding.
    [#50 Unit driver should assert PDU power-loss recovery mode on connect](https://github.com/The-MAST-project/MAST_unit.2024-12-12/issues/50):
    that is about the power state on the way up, this is about ownership left dangling by a host that
    died holding a mount, a stage or a camera. Needs a decision from Arie before it can be scoped.
+5. **Open (added 2026-10-06).** The model is decided; the mechanism is #45's to define.
 
 ---
 
@@ -261,7 +276,7 @@ flag at its next checkpoint and unwinding.
 |---|---|
 | §2 uniform verbs per host | #42 CONTRACT tier |
 | §2 CanonicalResponse envelope | #42 invariant 4 → #47 (#68/#69/#70, #73, #74) |
-| §2 global authentication | #45 (parked) |
+| §2 global authentication / access model | #45 (parked); access model decided 2026-10-06 |
 | §3 g1 rejection checks in the endpoint | #42 invariant 4 → #47; thin handler #34 (invariant 6) |
 | §3 g2 async endpoints | #81 (after #77) |
 | §3 g3 `asyncio.to_thread` dispatch | #81 (after #77) |
@@ -274,6 +289,7 @@ flag at its next checkpoint and unwinding.
 | §6 Q1 / Q3 | open — see §4 |
 | §6 Q2 | answered by #43 |
 | §6 Q4 | parked under #42 future directions |
+| §6 Q5 | open — #45 |
 
 Enforcement of every row above that is a rule rather than a one-off lands in #52, which is
 manifest-driven and xfail-keyed per sub-issue, so the suite records the gaps until each is closed.
