@@ -1,10 +1,10 @@
 ---
 name: MAST access control — Django is the sole permissions authority
-description: Decided 2026-10-06: users and permissions live only in the Django GUI; normal requests go browser → GUI → backend; backends take API keys; personal keys for engineers and operators only
+description: Team decision 2026-10-06 (Arie Blumenzweig): users and permissions live only in the Django GUI; normal requests go browser → GUI → backend; backends take API keys; personal keys for engineers and operators only
 type: project
 ---
 
-**Decided 2026-10-06 (Eli Brody).** Applies in every MAST repo that touches users, permissions or
+**Team decision, 2026-10-06; authority Arie Blumenzweig.** Applies in every MAST repo that touches users, permissions or
 backend calls (`MAST_gui`, `MAST_control`, `MAST_unit`, `MAST_spec`, `MAST_common`).
 
 - **Django is the only identity and permission store.** Users, groups and `accounts.can_*`

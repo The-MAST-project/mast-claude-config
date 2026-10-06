@@ -44,7 +44,7 @@ than loose dictionaries — the same models used for MongoDB serialisation.
 with a public router carved out for `/health` and documentation endpoints. Not yet implemented on
 any host (#45).
 
-**Access model (decided 2026-10-06, Eli Brody).** The Django GUI is the sole source of truth for
+**Access model (team decision, 2026-10-06; authority Arie Blumenzweig).** The Django GUI is the sole source of truth for
 MAST users and permissions, internal and external. A user's request goes browser → GUI → backend:
 the GUI authenticates the user and checks the permission, then makes the backend call itself.
 Backends authenticate the caller by API key and hold no user or permission data of their own.
