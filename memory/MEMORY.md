@@ -10,7 +10,7 @@ in-progress or machine-local notes stay in each developer's local `~/.claude` me
 - [Integration branch per MAST repo](reference_repo_branches.md) — `MAST_common`/`MAST_control`/`MAST_spec` integrate on `master`, the rest on `main`; single `origin` remote, no `upstream`
 
 ## Project
-- [MAST access control](project_access_control.md) — team decision 2026-10-06 (Arie): Django is the sole users/permissions authority; browser → GUI → backend; backends take API keys, personal keys for engineers/operators only; Mongo users/groups being removed
+- [MAST access control](project_access_control.md) — team decision 2026-10-06: Django is the sole users/permissions authority; browser → GUI → backend; backends take API keys, personal keys for engineers/operators only; Mongo users/groups being removed
 - [Prometheus monitoring of the Windows fleet](project_prometheus_windows.md) — windows_exporter on units, Prometheus on the control machine; onboarding steps
 - [SwitchedOutlet polish plan](switched-outlet-polish-plan.md) — PLANNED after calibration works: own PR against MAST_common main; ranked defects (tri-state collapse, silent power_on_or_off, dead _from_group, hostname fallback); mechanical-then-behavioural staging, tests first, cross-repo call-site survey
 - [`Mount.is_moving` is a tracking-quality signal, not a motion one](mount-is-moving-is-a-slew-detector.md) — MAST_unit; PWI4 rms thresholds mirror the GUI, so in wind it reads True while parked on target and `while mount.is_moving` stalls
