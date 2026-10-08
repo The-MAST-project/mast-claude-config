@@ -244,8 +244,17 @@ module logger) prove the path has never run.
 Killing a PWI4 holding a connected, tracking mount because a supervisor restarted is
 destructive — and adoption is what makes the staged rollout in §11 safe. `find_process` has no
 owner/session filter, so add `find_processes(..., session_id=)` and `process_session_id()` to
-`common/process.py`; adopt only same-session matches, and kill a different-session orphan
-**once**, at startup.
+`common/process.py`. Adopt a match in the supervisor's own login session, oldest first, the
+others reported. **A match in another login session is never killed** -- *decided 2026-10-08*,
+replacing this section's first rule of killing a different-session orphan once at startup. That
+rule dated from the NSSM services that ran PWI4 and PHD2 in session 0, which MAST_provisioning#159
+removed; it would also kill a usable copy started in an operator's Remote Desktop session, and
+as `mast` it could not kill a LocalSystem process anyway. Instead the row is **`blocked`**, at
+ERROR: not adopted, not killed, and no second copy spawned beside it, rechecked every probe
+interval until that copy exits; a respawn after the backoff looks first, for the same reason. A
+process whose session cannot be read counts as another session's, and a same-session copy the
+supervisor cannot stop (an elevated one) is `blocked` too. Spawned programs run with the executable's folder as their working directory
+(MAST_unit#21); a location registry left by provisioning is the expected long-term source.
 
 Spawn with an argv **list** and `shell=False` — `process.py`'s `cmd.split()` is broken for
 `C:\Program Files (x86)\…`, which is the whole reason the current code passes `shell=True` and
@@ -265,6 +274,11 @@ assertions above are `covers.pwi4_is_viable()` re-expressed without the client; 
 `MINIMUM_PWI4_VERSION` into `common/const.py` and have `covers.py` import it from there.
 Likewise do not import `unit.phd2` — a 30-line one-shot JSON-RPC in `probes.py`, socket closed
 each time.
+
+**A spawn gets a startup grace** -- *decided 2026-10-08*: failed probes do not count until the
+first healthy probe or 120 s, and the row is `starting` (WARNING) meanwhile, so a slow cold
+start is not a restart loop. An adopted program gets none. Probes never overlap: a program's next
+probe waits for its last, since the app probe may run 70 s on a 15 s interval.
 
 Failure handling: `unhealthy_threshold` (3) consecutive failures → terminate, grace, kill,
 respawn; `_Backoff(5.0, cap 120.0)` between restarts; more than 5 restarts in 600 s →
@@ -677,8 +691,9 @@ no hardware): `test_supervisor_resources.py` (all up → ready; one down → wai
 after the budget, **and it proceeds**; a raising probe is "down" and never propagates;
 transitions log once, not per poll), `test_supervisor_index_check.py` (`tmp_path` with 47 files;
 one missing; one zero-length), `test_supervisor_managed_process.py` (**the critical one**: a
-same-session match → zero spawns *and zero kills*; another-session match → killed once then
-spawn; threshold → exactly one restart; backoff caps; crash-loop stops),
+same-session match → zero spawns *and zero kills*; another-session match → zero kills, zero
+spawns, `blocked`, then a spawn once it exits; a spawn's failures inside the grace → `starting`,
+no restart; threshold → exactly one restart; backoff caps; crash-loop stops),
 `test_supervisor_probes.py` (a `TCPServer`/`http.server` on an ephemeral port — not an external
 process, so the conftest guard does not fire; PWI4 **unhealthy on a 200 that is not PWI4**),
 `test_supervisor_logsink.py` (bounded; formats in `emit`; `assert not
@@ -901,3 +916,11 @@ whether supervision runs independently of the window (§7 answers: workers first
 fail), and the maintenance flag carrying no who / when / why — are either answered here or
 remain open there. Once this plan lands, the 08-12 record should be marked superseded in
 MAST_provisioning, pointing here.
+
+**Revised 2026-10-08**, during stage 2 part 4 (MAST_supervision `managed.py`), two decisions by
+Eli. A copy of a supervised program in another Windows login session is **blocked, not killed**
+(§6): the kill-once rule answered session-0 copies left by NSSM services that no longer exist,
+and would have killed a usable Remote Desktop copy. And a **startup grace** of 120 s keeps a
+slow cold start from counting toward the restart threshold (§6). Two process states follow,
+`starting` and `blocked`, alongside a per-row `since`.
+
