@@ -73,7 +73,7 @@ that must always work can stay on a known-good revision while common moves.
 | `config/supervisor.py` — the schema sits beside `UnitConfig`/`SpecsConfig` | the service, the session bridge, the supervisor and everything below |
 | `const.py` — ports, `SUPERVISOR_PORT`, `BASE_SUPERVISOR_PATH`, `MINIMUM_PWI4_VERSION` | its own `pyproject.toml`, CI, README, `docs/decisions/` |
 | `process.py` — `find_processes(session_id=)`, `process_session_id()` | the installer |
-| `opmode.py`, `init_log(file_leaf=)`, and later a `SupervisorApi` client | |
+| `opmode.py`, `LogProgram` / `init_log(program=)`, and later a `SupervisorApi` client | |
 
 `state.py` stays in MAST_supervision until a second program (a MAST_gui fleet view) actually
 imports the snapshot model; promote it to common then.
@@ -805,7 +805,7 @@ telescope, not a remote-control surface.
 | stage | repo | contents |
 |---|---|---|
 | 0 | common | `common/opmode.py` (the merged opmode plan, stage 1) — prerequisite |
-| 1 | common | `config/supervisor.py`; `const.py` ports + `MINIMUM_PWI4_VERSION` + `SUPERVISOR_PORT` (8004, after the cross-repo grep) + `BASE_SUPERVISOR_PATH`; `find_processes`/`process_session_id`; `init_log` gains `file_leaf`; **a `sites` write path** (`$addToSet`/`$pull` on `units_in_maintenance`) beside `write_unit_delta` |
+| 1 | common | `config/supervisor.py`; `const.py` ports + `MINIMUM_PWI4_VERSION` + `SUPERVISOR_PORT` (8004, after the cross-repo grep) + `BASE_SUPERVISOR_PATH`; `find_processes`/`process_session_id`; `init_log` gains `program=LogProgram`; **a `sites` write path** (`$addToSet`/`$pull` on `units_in_maintenance`) beside `write_unit_delta` |
 | 1a | supervision | the seed: `pyproject.toml`, `uv.lock`, `ruff.toml`, CI (Linux + Windows, paired MAST_common branch), README, `docs/decisions/` records (MAST_provisioning's format), CLAUDE.md, the package-location test |
 | 1b | prov. | `mast-repos.tsv` row (`supervision`, `MAST_supervision`, `unit,spec`, `main`); `mast-clone` accepts `pyproject.toml` — `-r <dir>/pyproject.toml --group <dir>/pyproject.toml:dev` — where a repo has no `requirements.txt` |
 | 2 | supervision | `state.py`, resources, probes, managed, launcher, locate, logsink, gui_model + every test. `--dry-run` prints the resolved plan and exits |
@@ -830,9 +830,11 @@ hold until MAST_unit catches up:
   mirrors it (opmode-design §8 stage 6).
 - **PHD2 is observe-only** (§6) until stage 6.
 
-`init_log` gaining `file_leaf` in stage 1 is the fix for the log collision: without it the
-supervisor would write `mast-unit-log.txt`, the same file the app appends to, from a second
-process over SMB, with no PID in the format to tell them apart.
+`init_log` gaining `program=LogProgram.SUPERVISOR` is the fix for the log collision: without it
+the supervisor would write `mast-unit-log.txt`, the same file the app appends to, from a second
+process over SMB, with no PID in the format to tell them apart. The caller names its program
+and never the file, so the name stays derived from config.toml's `machine_role`:
+`mast-<role>-supervisor-log.txt` (MAST_common#148).
 
 **Port 8004 needs no firewall rule on provisioned units** — verified 2026-09-24: `bootstrap.ps1`'s
 `firewall-off` element disables Windows Firewall on all three profiles, the units sitting behind
@@ -931,3 +933,10 @@ slow cold start from counting toward the restart threshold (§6). Two process st
 Eli. The launcher's `controlled` refusal is **per role** (§15): MAST_unit#297 made the unit app
 wait for `startup` under `controlled`, so unit is allowed; MAST_spec reads no `opmode` yet, so
 spec stays refused. The unit change has not yet run on sky; nothing installs before stage 5.
+
+**Revised 2026-10-11**, for MAST_common#148, one decision by Eli. The supervisor's log file is
+**named by program, not by the caller** (§15): `init_log` takes `program=LogProgram.SUPERVISOR`
+rather than a `file_leaf`, so the role stays from config.toml and the file is
+`mast-<role>-supervisor-log.txt`. The `mast-supervisor-log.txt` named in the first round above
+would have dropped the role, and a free-form leaf would have let callers state the machine's
+identity again.
