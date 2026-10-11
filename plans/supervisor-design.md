@@ -821,10 +821,13 @@ deployable result, not just a shadow run — reboot → autologon → `mast-serv
 resources → PWI4 and ps3cli → VSCode, and the operator presses F5 as today. Two constraints
 hold until MAST_unit catches up:
 
-- **The launcher refuses `controlled`**, loudly, until MAST_unit's opmode stage 3 lands. Before
-  it, the app runs `startup()` unconditionally, so a supervisor-launched app would move hardware
-  on boot. A refusal, not a silent fallback to `operated`: a unit configured `controlled` that
-  quietly behaves otherwise is the failure the opmode plan's `ValueError` exists to prevent.
+- **The launcher refuses `controlled` for any role whose app does not yet act on `opmode`**,
+  loudly. Such an app runs `startup()` unconditionally, so a supervisor-launched one would move
+  hardware on boot. A refusal, not a silent fallback to `operated`: a machine configured
+  `controlled` that quietly behaves otherwise is the failure the opmode plan's `ValueError`
+  exists to prevent. **Unit is allowed** since MAST_unit#297 (the unit side of opmode stage 3:
+  under `controlled`, `start_lifespan` waits for `startup`); **spec stays refused** until MAST_spec
+  mirrors it (opmode-design §8 stage 6).
 - **PHD2 is observe-only** (§6) until stage 6.
 
 `init_log` gaining `file_leaf` in stage 1 is the fix for the log collision: without it the
@@ -924,3 +927,7 @@ and would have killed a usable Remote Desktop copy. And a **startup grace** of 1
 slow cold start from counting toward the restart threshold (§6). Two process states follow,
 `starting` and `blocked`, alongside a per-row `since`.
 
+**Revised 2026-10-11**, during stage 2 part 5 (MAST_supervision `launcher.py`), one decision by
+Eli. The launcher's `controlled` refusal is **per role** (§15): MAST_unit#297 made the unit app
+wait for `startup` under `controlled`, so unit is allowed; MAST_spec reads no `opmode` yet, so
+spec stays refused. The unit change has not yet run on sky; nothing installs before stage 5.

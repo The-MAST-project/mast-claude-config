@@ -347,7 +347,7 @@ or the spec's equivalent.
 | `operated` | the operator | from VSCode, which the supervisor opens; the supervisor never starts the app here |
 
 This keeps the supervisor plan's decision as it stands (under `operated` it launches VSCode,
-never the app, and it refuses `controlled` until stage 3 of §8 lands).
+never the app, and it refuses `controlled` for a role until that role's stage 3 of §8 lands: unit since MAST_unit#297, spec not yet).
 
 **The sequence:**
 
