@@ -101,6 +101,29 @@ Optionally make `Calibrator._start` and `Autofocuser.start_autofocus` refuse whi
 - Shape-gate replay: subsample recorded sweeps to 5×50 ticks to set `min_edge_rise`/`min_fit_r2` defaults.
 - Contract suite (`tests/contract/`) passes.
 
+## As built (2026-10-11) — where the code differs from the plan above
+Branches `focus-on-star` in MAST_common (73f03aa) and MAST_unit (e5e0844).
+- **Settings fields are documented with comments**, not `json_schema_extra`: that is the style of
+  `config/calibration.py`. Added `catalog_epoch=2016.0`.
+- **Stage:** the run puts the stage where the acquirer's spec phase does before solving (Sky on FCU v2,
+  Spec on v1) and keeps it there for the sweep, instead of `stage.home()`. FCU v1 is untested.
+- **Acquirer refactor:** `Acquirer.spec_phase_imager_settings()` / `spec_phase_tolerance()` extracted from
+  `do_acquire`, so focus_on_star solves exactly as the spec phase does instead of copying its overrides.
+- **Endpoint parameters** other than zenith/ra/dec default to `None` and fall back to `FocusOnStarSettings`,
+  so per-unit defaults live in the config DB.
+- **End state:** solved → tracking left on (the star stays put); failed or aborted → tracking stopped, as a
+  failed acquisition leaves it. An aborted run leaves the focuser where it is; only a failed one returns it.
+- **Unit status** does not carry focus_on_star; `GET /unit/focus_on_star_status` is the only view.
+- **Found, not fixed (pre-existing, separate issues):**
+  - `Solver.solve_and_correct`'s synthesised-acquisition branch (no `latest_acquisition`) passes `conf=` to
+    `Acquisition`, whose constructor no longer takes it — a `TypeError` if that branch ever runs.
+    focus_on_star always sets `latest_acquisition` first, so it never takes that branch.
+  - The cancelled early `return False` in `solve_and_correct` leaves `Solving` set; focus_on_star clears it.
+- **h5py** is pinned at 3.16.0 in `unit/requirements.txt` but is not yet installed on any unit; until it is,
+  only focus_on_star fails there (lazy import, clear error).
+- Tests: 51 new in MAST_unit + 5 in MAST_common (reader on a synthetic HTM catalog, selection, box geometry, HFD box, run sequence);
+  full unit suite 877 passed; common 717 passed.
+
 ## Catalog layout — verified 2026-10-11 (h5py 3.16.0, numpy 2.5.1, from mast00 over SMB)
 - `GAIADR3_htmColCell.mat` is MATLAB v5 → `scipy.io.loadmat` works. `ColCell` (53 names) + `ColUnits`.
   Needed columns (0-based): `RA`=0 (rad), `Dec`=1 (rad), `Epoch`=2 (2016), `PMRA`=7 (mas/yr), `PMDec`=9 (mas/yr),
