@@ -541,11 +541,24 @@ only once the machine is healthy answers a question nobody is asking; the valuab
 `phase=WAITING_FOR_RESOURCES network=down share=down`, which is precisely the window in which a
 DB-derived port would not exist.
 
-**It must not be able to kill the supervisor.** The Tk mainloop owns the main thread, so uvicorn
-runs in a worker with `install_signal_handlers=False` — without it, `Server.run()` raises off the
-main thread. A bind failure (port taken, another supervisor mid-restart) degrades to no-API with
-one WARNING, under the same rule as the window: **the supervisor must never die because a surface
-could not open.**
+**The port is the one-supervisor lock.** The likeliest reason 8004 is taken is an earlier
+supervisor still running, mid-shutdown or wedged, and a supervisor with no API beside one that
+answers is worse than one that failed to start: two loops adopting the same programs, with the
+one nobody can see in charge. So the window's rule (*never die because the window could not
+open*) does not extend to the API. The port is claimed before the loop starts, on a socket the
+supervisor binds itself and hands to uvicorn, which runs in a worker thread (uvicorn installs no
+signal handlers off the main thread). When the port is taken, the holder is asked for `/status`:
+
+- a **live** supervisor, whose snapshot is fresh in any phase: the new one logs an ERROR and
+  exits. A degraded peer is reporting a problem its replacement would meet too.
+- a **`STOPPING`** supervisor: waited for, bounded, then taken over as stuck.
+- **anything else** (no answer, a stale snapshot, not a snapshot): if the listener runs
+  `-m supervision` it is killed and the port taken over, its programs adopted as on any start.
+  A listener that is not a supervisor, or one that cannot be found or killed, aborts the new one.
+
+A predecessor in another login session is killed like one in this session: §6's never-kill rule
+covers the programs a supervisor runs, not another supervisor. The snapshot carries its heartbeat
+interval so "fresh" is judged against the interval in force, not the default.
 
 **Read-only, and the binding enforces it.** §13's boundary — *the supervisor is a console at the
 telescope, not a remote-control surface* — survives a read-only endpoint intact. But `/status` is
@@ -716,14 +729,18 @@ process; and a phase change emits one immediately rather than waiting for the in
 delta; and each returns the restart request rather than calling `sys.exit` itself, so the
 decision is testable apart from the exit.
 
-`test_supervisor_status_api.py` drives the app with FastAPI's `TestClient` — no uvicorn, no
-socket, so it runs on Linux CI: `/status` answers from a `STARTING` snapshot **before any
+`test_supervisor_status_api.py` runs the app on uvicorn on an ephemeral loopback port, which
+runs on Linux CI (`TestClient` would need httpx, which the repo does not declare): `/status` answers from a `STARTING` snapshot **before any
 resource is ready and before `Config()` has loaded**, which is the endpoint's reason to exist and
 therefore the assertion that matters most; the body is a `CanonicalResponse` with the snapshot
 under `value`; a `not_supervised` process does not make the overall report a fault; and the path
 is built from `BASE_SUPERVISOR_PATH` rather than a literal. Separately, assert
 `SUPERVISOR_PORT` is a plain constant and that nothing in the supervisor package calls
 `get_service()` to find it — that is the one invariant a later tidy-up would break silently.
+`test_supervisor_instance.py` covers the port claim against real sockets and a fake owner
+lookup: a live peer in any phase aborts and is not killed; a stale or silent supervisor is
+killed and the port taken; a `STOPPING` one is waited for, then killed once the wait runs out;
+a holder that is not a supervisor, or cannot be killed, aborts.
 
 Add `win32process.CreateProcess`/`CreateProcessAsUser` to the denied set in the common and unit
 conftests — the guard has a second door now — and give MAST_supervision's own conftest the same
@@ -940,3 +957,10 @@ rather than a `file_leaf`, so the role stays from config.toml and the file is
 `mast-<role>-supervisor-log.txt`. The `mast-supervisor-log.txt` named in the first round above
 would have dropped the role, and a free-form leaf would have let callers state the machine's
 identity again.
+
+**Revised 2026-10-11**, for stage 3 part 2 (MAST_supervision `api.py`, `instance.py`), one team
+decision. **The status port is the one-supervisor lock** (§7), replacing the round of 2026-09-22's
+"never killing the supervisor" constraint for the API: a bind failure degraded to no API, which
+would leave a supervisor nobody can see running beside a stale one that answers. A live holder
+now aborts the new supervisor, a `STOPPING` one is waited for, and a dead or wedged supervisor is
+killed and taken over, in any login session. The window keeps the never-die rule.
