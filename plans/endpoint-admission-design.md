@@ -7,7 +7,8 @@
 > admission lock closes the check-then-run race between two requests. Replaces
 > `refuse_while_shutting_down` in MAST_unit `app.py`.
 >
-> **Status: plan only — not implemented. Design agreed 2026-10-12; open items in §12.**
+> **Status: plan only — not implemented. Design agreed 2026-10-12; all design questions closed
+> (§12).**
 > Code baseline: MAST_common `master` @ `14890ae`, MAST_unit `main` @ `f76987b`, plus MAST_unit
 > branch `unit-startingup-gaps` @ `9a4f420` (the StartingUp / ShuttingDown dispatch flags this
 > plan relies on, §8). Builds the busy predicate of
@@ -160,11 +161,12 @@ middleware reads the matched route's scope rather than parsing its path.
 - Component activities still count toward `why_busy` in development, so a developer moving the
   stage makes the unit busy, and a unit operation is refused until it stops. That is the point.
 
-**The calibrator is unit scope** (§12.1). It is in `COMPONENT_ATTRIBUTES`
+**The calibrator is unit scope**, provisionally (§12.1). It is in `COMPONENT_ATTRIBUTES`
 ([app.py:146](../../unit/src/app.py#L146)) only because it has its own router; it is not
 hardware, and it raises `UnitActivities` (`Calibrating`, `CalibratingFocus`, …) like any unit
 operation. Scope is therefore an explicit property of a router, not inferred from the component
-list.
+list. `/calibrate` is work in progress, to be adopted or ditched; its classification below
+stands until then, and goes with it if it is ditched.
 
 ### 4.2 Admission class
 
@@ -292,9 +294,10 @@ That branch merges first.
    and let the worker notice and unwind later. Between the two, `why_busy` reads idle while
    the old thread is still running, and the gate admits a new operation on top of it. This is
    the hazard the `_expose_cancelled` comment in `Unit.__init__` describes for `Exposing`,
-   which is why that flag stays up until `do_expose` has really unwound. Each of these needs
-   the same shape — signal cancellation, end the flag when the worker exits — or `why_busy`
-   must also see the still-running worker.
+   which is why that flag stays up until `do_expose` has really unwound. **Decided: a flag is
+   cleared only after its worker threads have stopped.** Each of these takes the `Exposing`
+   shape — the ABORT verb signals cancellation, and the worker ends its own flag on exit, in a
+   `finally`. This is a fix, not just an audit, and lands before the gate (§11).
 4. **What MAST_control sends while a unit is guiding.** Row 5 admits only READ, ABORT and
    SHUTDOWN during guiding. Any correction, offset or focus call control makes mid-observation
    would start being refused; each needs a decision (an ABORT-like exemption, or a different
@@ -324,21 +327,32 @@ here, so its route list is not in this plan.
    `status()` wiring.
 4. **MAST_unit** — classify every unit-scope route (§4.2); record scope at registration; a test
    asserting each route's class and scope, so a new route forces a decision.
-5. **MAST_unit** — replace `refuse_while_shutting_down` with the gate and the claim (§5);
-   `test_shutdown_gate.py` becomes the admission test suite.
-6. **Audits** (§9), then enforce. Rollout: observe-only first (§12.2).
-7. Later, separately: MAST_spec (§10); the production/development rename (§7); the inactivity
+5. **MAST_unit** — fix §9.1 (flags raised before return) and §9.3 (flags cleared only after
+   the worker stops). Both are preconditions: without them the gate admits work on top of work.
+6. **MAST_control / MAST_gui** — audits §9.2 and §9.4, and any unit-level endpoints they call
+   for. Done **before** the gate reaches a production unit: it is enforcing from the first
+   deploy (§12.2), so nothing else would catch a refused call short of a failed night.
+7. **MAST_unit** — replace `refuse_while_shutting_down` with the gate and the claim (§5),
+   enforcing; `test_shutdown_gate.py` becomes the admission test suite.
+8. Later, separately: MAST_spec (§10); the production/development rename (§7); the inactivity
    shutdown (unit_idleness §7).
 
-## 12. Open items
+## 12. Decisions taken (2026-10-12)
 
-1. **Calibrator scope** — this plan makes it unit scope (§4.1). Confirm: is `/calibrate` driven
-   by the controller in production?
-2. **Observe-only rollout** — log every would-be refusal for a few nights before enforcing, the
-   pilot-then-commit shape unit_idleness §7 uses. Needs a switch (an env var or a config key) and
-   a decision on its default.
-3. **ABORT during `StartingUp`** — row 2 admits only READ and SHUTDOWN. Abort would let a client
-   stop a startup without shutting down; nothing needs it yet.
+1. **Calibrator** — unit scope, provisionally. `/calibrate` is work in progress, to be adopted
+   or ditched; its routes are classified as in §4.2 meanwhile.
+2. **No observe-only phase** — the gate enforces from its first deploy. Hence §11 puts the
+   control/GUI audits before it reaches a production unit.
+3. **No ABORT during `StartingUp`** — row 2 stays READ and SHUTDOWN. An abort would interrupt the
+   mount's find-home: `Mount.abort()` ends `FindingHome` and sends PWI4 `/mount/stop`, and nothing
+   then records that the mount is unhomed — PWI4 reports no homed state, and `Mount.operational`
+   does not consider it. The unit would be `RUNNING` and operational with an uncalibrated mount,
+   silently. A shutdown during startup interrupts the homing too, but then disconnects, and the
+   next `startup()` homes again, so it cannot leave an unhomed mount looking operational.
+   *Separately (not this plan):* the mount should know whether it has homed since it connected —
+   set when `FindingHome` ends normally, cleared by an abort or a disconnect — and report
+   "not homed" in `why_not_operational`.
+4. **ABORT verbs** — a flag is cleared only after its worker threads have stopped (§9.3).
 
 ## 13. Verification
 
