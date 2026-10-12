@@ -135,7 +135,7 @@ that a session-0 service is a **competing** path into the processes — a sessio
 by a hand-run unit that can neither draw with it nor see `Z:` — and that `mast-unit` commanded
 hardware on process start with no interlock. `mast-service` answers both by construction: it
 spawns nothing but the supervisor, and the supervisor and everything it starts run in the
-interactive session (§4); and under `operated` it launches VSCode, never the app (§8). So the
+interactive session (§4); and under `development` it launches VSCode, never the app (§8). So the
 supersession is a change of reason, not a reversal of intent — but it is provisioning's decision
 to record, beside the test and the finalize assertion it relaxes for `mast-service` alone.
 `mast-service` is not among `Get-MastServiceNames`' four names, so the stand-down would not remove
@@ -286,7 +286,7 @@ respawn; `_Backoff(5.0, cap 120.0)` between restarts; more than 5 restarts in 60
 button. A PWI4 that exits immediately because the mount is unplugged must not be restarted
 eight thousand times a night.
 
-**`not_supervised` is a distinct state, not a flavour of unhealthy.** VSCode under `operated`
+**`not_supervised` is a distinct state, not a flavour of unhealthy.** VSCode under `development`
 (§8) is launched once and never restarted, so "not running" is its normal resting condition.
 If that serialises as unhealthy, every developer machine reds out permanently on any fleet view
 built over `/status` — and a status surface that is always red is one nobody reads. The state
@@ -359,7 +359,7 @@ folder.
 
 ```
 In maintenance:  false
-Opmode:          controlled
+Opmode:          production
 ```
 
 plus hostname · role · phase · uptime · `opstate` · config generation, with `Config().degraded_reason`
@@ -399,7 +399,7 @@ snapshot, never from live state.
 
 ```
 Actions ─ Maintenance mode ─ activate / deactivate
-        └ Opmode           ─ operated / controlled
+        └ Opmode           ─ development / production
 ```
 
 Each item opens a **confirmation modal naming the exact effect**, in the operator's terms, before
@@ -410,8 +410,8 @@ anything is written:
 > controller will stop allocating plans to this unit. **Nothing on this machine stops** — PWI4,
 > PHD2 and the unit app keep running. The supervisor will then restart (about 10 seconds).
 
-> *Change opmode to `operated`?*
-> mast07's `opmode` becomes `operated` in the configuration database. The supervisor will
+> *Change opmode to `development`?*
+> mast07's `opmode` becomes `development` in the configuration database. The supervisor will
 > restart and open VSCode on `mast-unit.code-workspace` instead of running the unit app. **The
 > running unit app will be stopped.**
 
@@ -455,7 +455,7 @@ Apply `Site.normalize_unit_specifier` ([config/site.py:79](../../common/config/s
 the name before writing, so the entry matches what `common/parsers.py:95` compares against.
 
 **Opmode writes through `set_unit`**, which persists only the delta from `units.common`
-(`config/__init__.py:814-827`) — so setting a unit to `controlled` is exactly a one-key delta.
+(`config/__init__.py:814-827`) — so setting a unit to `production` is exactly a one-key delta.
 Note the corollary: setting a unit *back* to the value `units.common` already holds writes
 nothing and the unit inherits it again, which is correct but means the DB will not always show
 an explicit per-unit value. The label reads the effective value from `resolve_opmode()`, so it
@@ -489,7 +489,7 @@ exactly this and app.py already uses it for its startup banner.
 
 ```
 supervisor heartbeat  up 4:12:06  phase=RUNNING
-  role=unit  opmode=controlled  opstate=running  maintenance=false  config gen=418
+  role=unit  opmode=production  opstate=running  maintenance=false  config gen=418
   resources  network=ok  ramdisk=ok (47 indexes)  share=ok
   processes  pwi4=healthy pid=5120 r=0    phd2=healthy pid=7332 r=1
              ps3cli=healthy pid=8044 r=0  app=healthy pid=9160 r=0
@@ -600,16 +600,16 @@ invert the opmode plan's precedence.
 
 **`opmode` — one field, two readers** (*decided*):
 
-- **`controlled`** → the supervisor launches the app, which comes up in standby awaiting the
+- **`production`** → the supervisor launches the app, which comes up in standby awaiting the
   control machine. Restart on process exit or on the status endpoint not answering — **never**
   because `operational` is false; that is health, and the opmode plan puts health in
   `operational`/`why_not_operational`.
-*(The `automatic` opmode was renamed `operated` on 2026-10-06 — see opmode-design §2.
-`operated`: a person (the operator) runs the app from VSCode, and it starts the machine
-immediately. `controlled`: the control machine's supervisor runs the app, and it waits for
-`startup`.)*
+*(The opmodes were `automatic` / `controlled` until 2026-10-06, then `operated` / `controlled`
+until 2026-10-12 — see opmode-design §2. `development`: an engineer runs the app from VSCode,
+and it starts the machine immediately. `production`: the control machine's supervisor runs the
+app, and it waits for `startup`.)*
 
-- **`operated`** → the supervisor launches **VSCode** on `<top>/mast-<role>.code-workspace`
+- **`development`** → the supervisor launches **VSCode** on `<top>/mast-<role>.code-workspace`
   (which already exists on this machine) **once, at startup, and never again** — *decided*.
   Restarting the editor is the user's prerogative, not the supervisor's. Launch-once is still
   right, because it is what makes a reboot land the developer at their workspace with no
@@ -794,9 +794,9 @@ restarted PHD2 leaves the unit silently claiming a healthy guider.
 **Changed elsewhere — by the GUI, by the control machine, by hand in Mongo — the supervisor
 reports and does not act.** It registers a `Config` change callback on `units`, and when the
 effective `opmode` no longer matches the one it launched under, the header label shows both
-(`Opmode: controlled (DB now says operated)`) and the Actions menu gains an **Apply** item that
+(`Opmode: production (DB now says development)`) and the Actions menu gains an **Apply** item that
 performs the same restart. The reasoning is the one the menu's confirmation modal makes
-explicit: switching `controlled`→`operated` stops a running unit app, possibly mid-exposure.
+explicit: switching `production`→`development` stops a running unit app, possibly mid-exposure.
 That is a physical event, and a physical event should not be the silent consequence of someone
 saving a form in a browser. An operator — or the same person, a second later, clicking Apply —
 decides when.
@@ -833,17 +833,17 @@ telescope, not a remote-control surface.
 | 7 | spec | mirror stage 6 |
 | 8 | common | delete `WatchedProcess`, `log_stream`, `kill_process_by_name`, and (after a cross-repo grep) `ensure_process_is_running` |
 
-**What can ship before any MAST_unit change: stages 0–5, under `operated` only.** That is a
+**What can ship before any MAST_unit change: stages 0–5, under `development` only.** That is a
 deployable result, not just a shadow run — reboot → autologon → `mast-service` → supervisor →
 resources → PWI4 and ps3cli → VSCode, and the operator presses F5 as today. Two constraints
 hold until MAST_unit catches up:
 
-- **The launcher refuses `controlled` for any role whose app does not yet act on `opmode`**,
+- **The launcher refuses `production` for any role whose app does not yet act on `opmode`**,
   loudly. Such an app runs `startup()` unconditionally, so a supervisor-launched one would move
-  hardware on boot. A refusal, not a silent fallback to `operated`: a machine configured
-  `controlled` that quietly behaves otherwise is the failure the opmode plan's `ValueError`
+  hardware on boot. A refusal, not a silent fallback to `development`: a machine configured
+  `production` that quietly behaves otherwise is the failure the opmode plan's `ValueError`
   exists to prevent. **Unit is allowed** since MAST_unit#297 (the unit side of opmode stage 3:
-  under `controlled`, `start_lifespan` waits for `startup`); **spec stays refused** until MAST_spec
+  under `production`, `start_lifespan` waits for `startup`); **spec stays refused** until MAST_spec
   mirrors it (opmode-design §8 stage 6).
 - **PHD2 is observe-only** (§6) until stage 6.
 
@@ -879,7 +879,7 @@ prerequisite resources and the supervised processes; its four constraints — a 
 rather than a `services` row, binding in `STARTING`, never killing the supervisor, and
 read-on-`0.0.0.0`/write-on-`127.0.0.1` — all follow from the endpoint's purpose being to describe
 a machine that cannot reach the config DB. That in turn promoted the snapshot out of `gui_model.py`
-into `state.py`, now rendered by three surfaces rather than two. **VSCode under `operated` is
+into `state.py`, now rendered by three surfaces rather than two. **VSCode under `development` is
 launched once and never restarted** (§8), the user's prerogative, which required `not_supervised`
 as a state distinct from unhealthy (§6) so that a closed editor is not a fleet-wide fault.
 `SUPERVISOR_PORT = 8004` was verified free against the live `services` collection (`unit` 8000,
@@ -914,8 +914,8 @@ rounds could not answer are now answered: provisioned units already have autolog
 Firewall is off fleet-wide, so 8004 needs no rule (§15); and no MAST service exists at all since
 MAST_provisioning#159, so there is no `mast-unit` to replace — but that same decision forbids
 registering `mast-service`, and needs superseding in provisioning (§3). §15 now marks what can
-ship before any MAST_unit change (stages 0–5, `operated` only), with the launcher refusing
-`controlled` and PHD2 observed rather than supervised until MAST_unit catches up (§6).
+ship before any MAST_unit change (stages 0–5, `development` only), with the launcher refusing
+`production` and PHD2 observed rather than supervised until MAST_unit catches up (§6).
 
 **Correction to the previous round:** the decision record called dangling above **exists** — in
 MAST_provisioning, not in mast-claude-config:
@@ -947,8 +947,8 @@ slow cold start from counting toward the restart threshold (§6). Two process st
 `starting` and `blocked`, alongside a per-row `since`.
 
 **Revised 2026-10-11**, during stage 2 part 5 (MAST_supervision `launcher.py`), one decision by
-Eli. The launcher's `controlled` refusal is **per role** (§15): MAST_unit#297 made the unit app
-wait for `startup` under `controlled`, so unit is allowed; MAST_spec reads no `opmode` yet, so
+Eli. The launcher's `production` refusal is **per role** (§15): MAST_unit#297 made the unit app
+wait for `startup` under `production`, so unit is allowed; MAST_spec reads no `opmode` yet, so
 spec stays refused. The unit change has not yet run on sky; nothing installs before stage 5.
 
 **Revised 2026-10-11**, for MAST_common#148, one decision by Eli. The supervisor's log file is

@@ -1,13 +1,15 @@
 # MAST operating modes — `opmode`
 
 > How a unit or spec machine reaches its operational state, selected by a new `opmode`
-> field with two values, `operated` and `controlled` (plus `tested`, a CI-only mode selected
+> field with two values, `development` and `production` (plus `tested`, a CI-only mode selected
 > by environment and never stored); and a reported `opstate` of
 > `initializing` / `initialized` / `running` / `shutdown`. Consumed by the units, the spec, and
 > the (not yet built) MAST supervisor. Spans MAST_common, MAST_unit, MAST_spec and
 > MAST_control, which is why it belongs in `mast-claude-config/plans/` rather than one repo.
 >
 > **Status: plan only — not implemented; all design questions closed (rev. 2026-10-06).**
+> **Renamed 2026-10-12:** the modes are `development` / `production` (were `operated` /
+> `controlled`) throughout this document; §2 and §11 record why.
 > Code baseline: MAST_common `master` @ `02e5a42`, MAST_unit `main` as of 2026-09-16.
 
 ## Context
@@ -45,7 +47,7 @@ the provenance chain:
 | | decided in | decided when | source |
 |---|---|---|---|
 | `tested` vs the rest | `app.main()` | before `Config()` exists | **env only** |
-| `operated` vs `controlled` | `Unit.start_lifespan` | after `Config()` exists | env, then DB, then default |
+| `development` vs `production` | `Unit.start_lifespan` | after `Config()` exists | env, then DB, then default |
 
 `tested` must be readable without the config DB, yet the DB is source #2. It is resolvable
 because `main()` asks only the environment.
@@ -58,35 +60,37 @@ the dead class lives). It imports `os`, `enum` and `get_logger`, nothing else.
 
 ```python
 class OpMode(StrEnum):                     # the values a real machine can have
-    OPERATED   = "operated"                # a person runs the app; it starts at once
-    CONTROLLED = "controlled"              # the supervisor runs the app; it waits for startup
+    DEVELOPMENT   = "development"                # a person runs the app; it starts at once
+    PRODUCTION = "production"              # the supervisor runs the app; it waits for startup
 
 class OpState(StrEnum):                    # revised 2026-10-06, see §4
     INITIALIZING = "initializing"; INITIALIZED = "initialized"
     RUNNING = "running"; SHUTDOWN = "shutdown"
 
 OPMODE_ENV = "MAST_OPMODE"
-DEFAULT_OPMODE = OpMode.OPERATED
+DEFAULT_OPMODE = OpMode.DEVELOPMENT
 TESTED = "tested"                          # CI-only MAST_OPMODE value -- not an OpMode (below)
 ```
 
-**The two modes are named for who is in charge of the machine** — *renamed 2026-10-06*, from
-`automatic`:
+**The two modes are named for what the machine is being used for** — *renamed 2026-10-12*,
+from `operated` / `controlled`, which were themselves renamed from `automatic` / `controlled`
+on 2026-10-06:
 
-> `operated` — a person (the operator) runs the app from VSCode, and it starts the machine
-> immediately. `controlled` — the control machine's supervisor runs the app, and it waits for
-> `startup`.
+> `development` — an engineer runs the app from VSCode, and it starts the machine immediately;
+> component endpoints are open. `production` — the control machine's supervisor runs the app,
+> and it waits for `startup`; the machine is governed only through its unit-level endpoints.
 
-`operated` was chosen over `manual`, which reads as "nothing happens until someone commands it"
-— the opposite of this mode, which starts the machine with no command at all; it is
-`controlled` that waits. The names rely on MAST's meaning of *operator* as a person (in plain
-English "operated" and "controlled" are near-synonyms), which is why this definition goes
-wherever the enum is declared or documented.
+The 2026-10-06 names said who starts the app, and leaned on MAST's meaning of *operator* as a
+person (in plain English "operated" and "controlled" are near-synonyms). The 2026-10-12 names
+say what the mode is *for*, which is also what endpoint admission keys on
+([endpoint-admission-design.md](endpoint-admission-design.md) §4.1, §7). The old values are
+still read, with a WARNING, because config documents already carry them and every machine reads
+one shared DB (MAST_common DECISIONS 2026-10-12).
 
 `StrEnum`, not `Literal`. The repo already answered this: `LimitFrameMode`
 ([common/config/phd2.py:16-51](../../common/config/phd2.py#L16)) is the existing
 per-unit config mode field, and it is a `StrEnum` with `json_schema_extra` UI metadata. A
-`StrEnum` *is* a `str`, so `mode == "operated"` works and `model_dump()` emits the bare
+`StrEnum` *is* a `str`, so `mode == "development"` works and `model_dump()` emits the bare
 literal. Copy that file's field declaration line for line.
 
 **Three functions:**
@@ -94,10 +98,10 @@ literal. Copy that file's field declaration line for line.
 - `tested_mode_requested() -> bool` — `MAST_OPMODE` is `tested`. Touches no config, no DB.
   This is what `main()` asks first (§3).
 - `opmode_from_env() -> OpMode | None` — source #1 alone. Touches no config, no DB.
-- `resolve_opmode() -> OpMode` — env → config → `operated`. On env miss, imports `Config`
+- `resolve_opmode() -> OpMode` — env → config → `development`. On env miss, imports `Config`
   *function-locally* and dispatches on `load_local_config().machine_role`: `unit` →
   `Config().get_unit().opmode`, `spec` → `Config().get_specs().opmode`, `control` → the
-  default. Any exception → WARNING + `operated`.
+  default. Any exception → WARNING + `development`.
 
 Role dispatch belongs in `common`, matching `notifications._build_initiator` and
 `init_log` (guarded by `common/tests/test_role_consumers.py`), so MAST_spec calls one
@@ -106,12 +110,12 @@ function rather than re-implementing the chain.
 **An unrecognised `MAST_OPMODE` raises `ValueError`** naming the value and the legal ones —
 exactly as `resolve_log_level`
 ([common/mast_logging.py:259-277](../../common/mast_logging.py#L259)) does, and for a sharper
-reason: `MAST_OPMODE=controled` silently degrading to `operated` means a unit opens its covers
+reason: `MAST_OPMODE=controled` silently degrading to `development` means a unit opens its covers
 while the supervisor believes it is parked. Accept `.strip().lower()`.
 
 **`tested` is CI-only, and outside both enums** — *decided 2026-10-06*. It never reaches a real
 unit: whether the app is started by the supervisor or by an operator in VSCode, the mode it
-reads from the database is `operated` or `controlled`. So `tested` is not an `OpMode` member
+reads from the database is `development` or `production`. So `tested` is not an `OpMode` member
 and has no `OpState`:
 
 - The database cannot hold it **by type**: the config field is an `OpMode`, which has no such
@@ -130,22 +134,22 @@ pulled. Do **not** reuse the name: `OpMode` keeps a stale importer's `ImportErro
 
 ## 3. What each mode does
 
-### `operated` — nothing observable changes
+### `development` — nothing observable changes
 
-> `operated` — a person (the operator) runs the app from VSCode, and it starts the machine
-> immediately. `controlled` — the control machine's supervisor runs the app, and it waits for
+> `development` — a person (the operator) runs the app from VSCode, and it starts the machine
+> immediately. `production` — the control machine's supervisor runs the app, and it waits for
 > `startup`.
 
 
-`resolve_opmode()` returns `OPERATED` when the env is unset and no `opmode` key exists,
-carried by the pydantic default. `Unit.start_lifespan` gains a branch whose `operated` arm is
+`resolve_opmode()` returns `DEVELOPMENT` when the env is unset and no `opmode` key exists,
+carried by the pydantic default. `Unit.start_lifespan` gains a branch whose `development` arm is
 the existing `self.startup()` call verbatim.
 
 The field **must** have a default: `get_unit` merges `units.common` with the per-unit delta
 ([common/config/__init__.py:746-777](../../common/config/__init__.py#L746)), and a
 required field absent from `common` raises for every unit in the fleet at once.
 
-### `controlled` — initialized, then wait
+### `production` — initialized, then wait
 
 The key finding: **priming already happens in the constructors.** `Mount.__init__`,
 `Covers.__init__`, `Stage.__init__`, `Focuser.__init__` and `Imager.__init__` each power their
@@ -163,7 +167,7 @@ outlet and connect ([mount.py:176-187](../../unit/src/mount.py#L176),
 | stage | [stage.py:497](../../unit/src/stage.py#L497) — move to `Sky` |
 | camera | [ascom.py:581](../../unit/src/imagers/ascom.py#L581) / [zwo.py:214](../../unit/src/zwo.py#L214) — cooler |
 
-So the `controlled` branch of `start_lifespan` is nearly a no-op: call the existing
+So the `production` branch of `start_lifespan` is nearly a no-op: call the existing
 `Unit.connect()` ([unit.py:337-342](../../unit/src/unit.py#L337)), set
 `opstate = INITIALIZED`, log. **The mount's axes are energised while waiting** — *decided*;
 `connect()`'s mount setter runs `mount_enable(0)`/`mount_enable(1)`
@@ -247,14 +251,14 @@ directory. That is consistent with the design, not a hole in it: `tested` avoids
 The unit and the spec report two new values in their status: `opmode`, and an `opstate`.
 
 ```
-initializing ──(end of start_lifespan, controlled)──▶ initialized ──startup──▶ running ⇄ shutdown
+initializing ──(end of start_lifespan, production)──▶ initialized ──startup──▶ running ⇄ shutdown
                                                                                 startup / shutdown
 ```
 
 | value | meaning | set |
 |---|---|---|
 | `initializing` | the process is constructing the machine and bringing it up | in `Unit.__init__` |
-| `initialized` | up, and no lifecycle command received yet: awaiting the first `startup` | at the end of `start_lifespan`, `controlled` only |
+| `initialized` | up, and no lifecycle command received yet: awaiting the first `startup` | at the end of `start_lifespan`, `production` only |
 | `running` | the last lifecycle command received was a `startup` | on receipt of `startup` |
 | `shutdown` | the last lifecycle command received was a `shutdown` | on receipt of `shutdown` |
 
@@ -293,7 +297,7 @@ and it is `True` in `initialized` too.
 report; its status carries `opmode: "tested"` and nothing else of this kind (§3). It runs only in
 CI and never on a real unit (§2), so no real consumer ever sees it.
 
-`opstate` cannot be derived from what exists. A fresh `controlled` boot and a fully started unit
+`opstate` cannot be derived from what exists. A fresh `production` boot and a fully started unit
 are **identical** on the wire today: `was_shut_down=False`, `operational=True`, `activities=0`.
 
 Do not reuse `UnitActivities` for it -- CLAUDE.md makes the bitmask cross-repo co-owned, and
@@ -303,7 +307,7 @@ named after a resting state to clear waits for ever.
 A read-only property over one private attribute, with **one writer per transition**:
 
 - `_opstate = INITIALIZING` at the start of `Unit.__init__`, in **all** modes
-- `→ INITIALIZED` at the end of `Unit.start_lifespan`, in `controlled` only (in `operated`,
+- `→ INITIALIZED` at the end of `Unit.start_lifespan`, in `production` only (in `development`,
   `start_lifespan` calls `startup()` instead, which sets `RUNNING`)
 - `→ RUNNING` on entry to `startup()` ([unit.py:264-273](../../unit/src/unit.py#L264)),
   before the thread is spawned
@@ -316,7 +320,7 @@ worked" polls `operational`, or waits on the `x-completion: activity:StartingUp`
 endpoint already publishes. That is one fact per field rather than one field trying to carry
 liveness, progress and health at once.
 
-The supervisor loop: power the computer (and, under `controlled`, start the app) → poll until the
+The supervisor loop: power the computer (and, under `production`, start the app) → poll until the
 port answers with `opstate == "initialized"` → `PUT /startup` → poll until `operational` → work
 → `PUT /shutdown` → poll until `opstate == "shutdown"` and `ShuttingDown` has cleared →
 optionally `PUT /powerdown`.
@@ -343,11 +347,11 @@ or the spec's equivalent.
 
 | opmode | started by | how |
 |---|---|---|
-| `controlled` | the mast-supervisor | runs the role's app (`MAST_unit` or `MAST_spec` `app.py`), per `machine_role` |
-| `operated` | the operator | from VSCode, which the supervisor opens; the supervisor never starts the app here |
+| `production` | the mast-supervisor | runs the role's app (`MAST_unit` or `MAST_spec` `app.py`), per `machine_role` |
+| `development` | the operator | from VSCode, which the supervisor opens; the supervisor never starts the app here |
 
-This keeps the supervisor plan's decision as it stands (under `operated` it launches VSCode,
-never the app, and it refuses `controlled` for a role until that role's stage 3 of §8 lands: unit since MAST_unit#297, spec not yet).
+This keeps the supervisor plan's decision as it stands (under `development` it launches VSCode,
+never the app, and it refuses `production` for a role until that role's stage 3 of §8 lands: unit since MAST_unit#297, spec not yet).
 
 **The sequence:**
 
@@ -358,8 +362,8 @@ never the app, and it refuses `controlled` for a role until that role's stage 3 
    `create_app(unit)` then includes the routes of the components that exist.
 2. **`app.lifespan`** calls the top component's `start_lifespan()`, yields while the app
    serves, then calls its `end_lifespan()`. This is the unit's shape today.
-3. **`start_lifespan()`**: under `operated`, calls `startup()` (→ `RUNNING`); under
-   `controlled`, sets `opstate = INITIALIZED` and returns, leaving the machine to wait for the
+3. **`start_lifespan()`**: under `development`, calls `startup()` (→ `RUNNING`); under
+   `production`, sets `opstate = INITIALIZED` and returns, leaving the machine to wait for the
    `startup` endpoint.
 4. **The opmode is read in one place: the top component.** Components do not branch on it. A
    per-component check would start a component before its siblings exist, and makes a component
@@ -388,7 +392,7 @@ attributes-only half and a `bring_up()`. What the chosen design accepts in retur
   the lifespan's startup half before it opens its port (`uvicorn/server.py` `Server.startup`:
   `await self.lifespan.startup()` precedes `create_server`; checked in 0.50.1). So
   `initializing` is never observed over HTTP, and the first state a client ever sees is
-  `initialized` (or `running`, under `operated`).
+  `initialized` (or `running`, under `development`).
 - **A hung constructor looks like a dead process** -- no port, no `why_not_operational`. The
   supervisor bounds its wait for the port, as it bounds every other wait (§11: timeouts belong
   to the supervisor).
@@ -430,16 +434,16 @@ Arie sets it to `False` in the documents by hand.
 **This changes today's behaviour, deliberately.** Until 2026-10-06 the mount and the covers
 powered off on every `shutdown`, unconditionally (the covers in `ontimer`, on reaching
 `Closed`); the focuser, stage and imager did not. An earlier revision of this section said the
-`False` default "keeps today's behaviour" -- that was wrong. Under `operated`, where nothing sends
+`False` default "keeps today's behaviour" -- that was wrong. Under `development`, where nothing sends
 `powerdown`, a sun-up `shutdown` now leaves the mount and covers energised too.
 
 `json_schema_extra` waits for a boolean widget, which no config field has yet (§6).
 
 ## 5. Prerequisite bug fixes — the real work
 
-`controlled` runs start→shut→start repeatedly. `operated` runs it at most once per process,
+`production` runs start→shut→start repeatedly. `development` runs it at most once per process,
 which is why none of these has ever been noticed. **All four must land before any unit is
-configured `controlled`.**
+configured `production`.**
 
 1. **`do_startup` has no error containment.** [unit.py:256-258](../../unit/src/unit.py#L256)
    is `[comp.startup() for comp in self.components]` — one raising component skips every
@@ -457,7 +461,7 @@ configured `controlled`.**
 
 3. **`do_shutdown` aborts only the guider.** Call `self.abort()` first — *decided* — so an
    exposure or flux-metering run does not continue while the covers close. This changes
-   `operated` behaviour too, deliberately, and lands while the fleet is still `operated` so
+   `development` behaviour too, deliberately, and lands while the fleet is still `development` so
    any regression surfaces under the mode in production.
 
 4. **`powerdown` blocks the request thread.** `Unit.powerdown` (:289-298) spins
@@ -474,7 +478,7 @@ configured `controlled`.**
 
 ## 6. Config, wire, and the `powerdown` endpoint
 
-**Config fields.** `opmode: OpMode = OpMode.OPERATED` on `UnitConfig`
+**Config fields.** `opmode: OpMode = OpMode.DEVELOPMENT` on `UnitConfig`
 ([common/config/unit.py:69-89](../../common/config/unit.py#L69)) and `SpecsConfig`
 ([common/config/specs.py:76-87](../../common/config/specs.py#L76)), each with the
 `json_schema_extra` UI block modelled on `LimitFrameConfig.mode`. No validator: the `OpMode`
@@ -525,10 +529,10 @@ exists. The `tested` half is shared outright: same `tested_router`, same two rou
 | stage | repo | contents | safe because |
 |---|---|---|---|
 | 1 | common | `opmode.py` (enums, resolver, `tested_mode_requested`, `tested_router`); config fields; `OperatingStatus` mixin; delete `OperatingMode`; tests; `DECISIONS.md` | nothing reads any of it yet |
-| 2 | unit | the four fixes in §5 | stand on their own merit; land under `operated` |
-| 3 | unit | `_opmode`, `_opstate` (four states, §4), `OpState` renamed in common, status fields, lifespan branch, `run_tested_app()` + the `main()` branch, `powerdown` route | no unit configured `controlled` yet |
+| 2 | unit | the four fixes in §5 | stand on their own merit; land under `development` |
+| 3 | unit | `_opmode`, `_opstate` (four states, §4), `OpState` renamed in common, status fields, lifespan branch, `run_tested_app()` + the `main()` branch, `powerdown` route | no unit configured `production` yet |
 | 4 | CI | a smoke job: launch `app.py` with `MAST_OPMODE=tested` and a test `MAST_CONFIG`, poll `status` until it answers `opmode: "tested"`, `PUT quit`, assert exit 0 | first end-to-end coverage of the app's own entry point, which pytest never touches |
-| 5 | DB | write `opmode = "operated"` into `units.common`, then flip units to `controlled` | `set_unit` persists only the delta, so per-unit is one key |
+| 5 | DB | write `opmode = "development"` into `units.common`, then flip units to `production` | `set_unit` persists only the delta, so per-unit is one key |
 | 6 | spec/control/gui | mirror stages 2-3; read `opmode`/`opstate`; build the supervisor | |
 
 **Ordering constraint:** stage 1 must land *and be pulled everywhere* before stage 3 ships.
@@ -538,9 +542,9 @@ exists. The `tested` half is shared outright: same `tested_router`, same two rou
 **Unit tests** — house style: subclassed fakes, `object.__new__(Config)`, no Mongo, no hardware.
 
 - `common/tests/test_opmode.py` — env beats config; config beats default; default is
-  `operated` when no document carries the key (this doubles as the "adding the field breaks no
+  `development` when no document carries the key (this doubles as the "adding the field breaks no
   existing unit" guard); a bad env value raises; case/whitespace tolerated; role dispatch for
-  `spec` and `control`; unreachable config → `operated` + WARNING. **The critical one:** point
+  `spec` and `control`; unreachable config → `development` + WARNING. **The critical one:** point
   `MAST_CONFIG` at a nonexistent path so any config read would raise, and assert
   `tested_mode_requested()` is still true with `MAST_OPMODE=tested` — that pins the circularity
   fix structurally. And `opmode_from_env()` raises on `tested`, naming it CI-only.
@@ -548,8 +552,8 @@ exists. The `tested` half is shared outright: same `tested_router`, same two rou
   models (by type: `OpMode` has no such member); `json_schema_extra["ui"]["options"] == [m.value for m in OpMode]`.
 - `common/tests/test_operating_status_on_the_wire.py` — both fields `None` by default; a
   legacy payload with neither key validates; `model_dump()` emits bare strings.
-- `unit/tests/test_opmode_startup.py` — under `operated`, `start_lifespan` calls `startup()`;
-  under `controlled` it does not, and leaves `opstate == INITIALIZED`; in `controlled`,
+- `unit/tests/test_opmode_startup.py` — under `development`, `start_lifespan` calls `startup()`;
+  under `production` it does not, and leaves `opstate == INITIALIZED`; in `production`,
   covers/mount/stage are never asked to move.
 - `unit/tests/test_tested_mode.py` — with `MAST_OPMODE=tested` and `uvicorn.Server.run`
   monkeypatched: `Config.__init__` (monkeypatched to raise) is never reached, and the app's
@@ -567,7 +571,7 @@ exists. The `tested` half is shared outright: same `tested_router`, same two rou
   timer or sets the event; **start → shut → start ends `running` with `operational` true**
   (the §5.2 regression guard); `end_lifespan` does both.
 - `unit/tests/test_opstate_transitions.py` — `initializing` from the start of `__init__`;
-  `initialized` after `start_lifespan` under `controlled`, even with `_init_errors` set (health
+  `initialized` after `start_lifespan` under `production`, even with `_init_errors` set (health
   belongs to `operational`, not `opstate`); `running` on entry to `startup()` **before** the
   thread finishes; `shutdown` on entry to `shutdown()`, from `initialized` as well as from
   `running`; **a `shutdown` from `shutdown` stays `shutdown`** (idempotence); `startup` from
@@ -589,8 +593,8 @@ of `endpoint_powerdown` is forgotten; `test_activity_flag_balance.py` demands a 
    Mongo. Then `PUT /mast/api/v1/unit/quit` → the response arrives, the lifespan's shutdown half
    runs, the process exits 0. **Run this on a machine with no config DB reachable** — that is
    the case it exists for.
-2. `MAST_OPMODE=controlled python src/app.py` → `GET /mast/api/v1/unit/status` reports
-   `opstate: "initialized"`, `opmode: "controlled"`. **Confirm physically: covers shut, mount not
+2. `MAST_OPMODE=production python src/app.py` → `GET /mast/api/v1/unit/status` reports
+   `opstate: "initialized"`, `opmode: "production"`. **Confirm physically: covers shut, mount not
    homed, stage not at `Sky`, focuser unmoved.**
 3. `PUT /startup` → `opstate` goes `running` immediately; covers open, mount homes, stage moves;
    `operational` goes `true` once `StartingUp` clears.
@@ -598,7 +602,7 @@ of `endpoint_powerdown` is forgotten; `test_activity_flag_balance.py` demands a 
 5. **`PUT /startup` again → `running`, and `operational` goes `true` a second time.** This is
    the cycle that is broken today; if `operational` never returns, §5.2 did not land.
 6. `PUT /powerdown` → component outlets off, process still serving, `Computer` outlet untouched.
-7. Unset `MAST_OPMODE`, restart → `operated`, byte-identical behaviour to today.
+7. Unset `MAST_OPMODE`, restart → `development`, byte-identical behaviour to today.
 
 ## 10. What this does NOT do
 
@@ -623,7 +627,7 @@ because the reasoning is the part that is expensive to reconstruct.
 shape. It is not: that variable was correcting a *mixup* — for a while `MAST_PROJECT` held the
 machine role, which is not what its name meant — and the fix was to move the role into a TOML
 field, not to forbid environment variables. So there is no standing decision to argue with, and
-`MAST_OPMODE=controlled` on a bench machine is legitimate.
+`MAST_OPMODE=production` on a bench machine is legitimate.
 
 Note in passing: `MAST_PROJECT` is gone from the code in MAST_common and MAST_unit (no reader,
 no setter; `common/tests/test_local_config.py:75` deliberately sets it to prove it is inert),
@@ -660,7 +664,7 @@ consequence: `initializing` is never visible over HTTP, and a client first sees 
 A background bring-up thread was considered and rejected. See §4a.
 
 **`tested` is CI-only, environment-only, and in neither enum** (2026-10-06). The database
-holds only `operated` or `controlled`, and the type enforces it. `main()` intercepts `tested`
+holds only `development` or `production`, and the type enforces it. `main()` intercepts `tested`
 before the mode is resolved. A `tested` process reports `opmode: "tested"` and no `opstate`.
 See §2.
 
@@ -669,13 +673,19 @@ an operator (`operated`) or the control machine (`controlled`). `manual` was con
 rejected as reading like "passive". See §2 for the definition. Free to do now: no unit or spec
 document in the config database carries an `opmode` key yet.
 
+**`operated` / `controlled` are renamed `development` / `production`** (2026-10-12). Named for
+what the mode is for, which endpoint admission keys on. Not free this time — `units/common`
+holds `operated` and `units/mast00` holds `controlled` — so `OpMode` still reads the old values
+with a WARNING, and the old member and property names stay as deprecated aliases. Rollout:
+merge, pull `common` everywhere, then update the documents. See §2.
+
 **The opmode is resolved lazily, on first read** (2026-10-06), not in `Unit.__init__`. First read
 is `start_lifespan`, before the port opens; `resolve_opmode()` never raises. See §4.
 
 **No `READY` opstate** (2026-10-06). See §4a: `RUNNING and operational` already says
 "started and working", and a `READY` would bring health into `opstate`.
 
-**The operator starts the app under `operated`; the supervisor only under `controlled`**
+**The operator starts the app under `development`; the supervisor only under `production`**
 (2026-10-06). Keeps the supervisor plan's existing decision. See §4a.
 
 **`power_down_on_shutdown` is a config-DB field, per machine** (2026-10-06): on `UnitConfig`
@@ -725,7 +735,7 @@ behalf. Where a wait is genuinely a problem, the fix is to move it off the reque
 **Revised 2026-10-06** with Arie, in session: the machine-lifecycle section (§4a); `opstate`
 redefined as `initializing` / `initialized` / `running` / `shutdown` (§4), which undoes the first
 draft's merging of "never started" and "shut down" into `standing-by`; no `READY` state; the
-operator, not the supervisor, starts the app under `operated`; `power_down_on_shutdown` as a
+operator, not the supervisor, starts the app under `development`; `power_down_on_shutdown` as a
 config-DB field defaulting to `False`; construction left before uvicorn, accepting that
 `initializing` is never visible over HTTP; `tested` kept, as a CI-only mode outside
 `OpMode` and `OpState`; and `automatic` renamed `operated` (Arie's choice over `manual`). A
