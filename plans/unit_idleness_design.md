@@ -10,6 +10,19 @@
 > `end_activity` — three mechanisms that were each designed and then rejected (§5). Code
 > baseline: MAST_common `master` @ `2a9ff59`, MAST_unit `main` @ `dcefc18`, 2026-10-06.
 > Branch `feat/active-idle-since` exists in MAST_unit, empty.
+>
+> **Revised 2026-10-12 by [endpoint-admission-design.md](endpoint-admission-design.md)**, which
+> needs the same busy predicate at request time and so builds it first (its phase 1). Three
+> changes to this plan follow from it, and win where the two disagree:
+>
+> - `why_not_idle` is named **`why_busy`**, beside `Unit.is_busy` / `Unit.is_idle`.
+> - `not was_shut_down` moves **out** of the predicate. `is_idle` is exactly `not is_busy`, so
+>   with that term a shut-down unit would read as busy. Inactivity-shutdown eligibility is
+>   `is_idle and not was_shut_down`, stated where it is used (§7), not folded into idleness.
+> - `why_busy` is computed **on demand** from in-memory flags, not once per `ontimer` tick:
+>   the admission gate cannot tolerate a 2 s stale answer. The marks stay in `ontimer`. The
+>   guiding term reads a cached `guider.is_guiding` refreshed there, since PHD2's answer is a
+>   socket round-trip (endpoint-admission §3.2).
 
 ## 1. Why
 
@@ -74,11 +87,13 @@ depend on getting anything subtle right:
 - `Mount.shutdown()` disconnects, and its docstring is explicit: *"**No park.** MAST has no
   defined park position: disconnecting disables both axes…"* Disabled axes cannot track.
 
-Note it is **not** `Unit.abort()` that does this, and it is just as well. `do_shutdown` does not
-call `abort` at all, and abort deliberately *may leave tracking running*: it reuses the
-acquisition/guiding stop verb, *"notably the `was_tracking_before_guiding` rule, which decides
-whether tracking is left running and is easy to get wrong"* (`unit.py:592`). Shutdown-by-
-disconnect is the blunt instrument this argument needs; abort is not.
+Note it is **not** `Unit.abort()` that does this, and it is just as well. `do_shutdown` *does*
+call `abort` first (opmode-design 5.3, to stop in-flight work before the covers close; this
+section originally said it did not, which stopped being true when 5.3 landed), but abort
+deliberately *may leave tracking running*: it reuses the acquisition/guiding stop verb,
+*"notably the `was_tracking_before_guiding` rule, which decides whether tracking is left running
+and is easy to get wrong"*. So the abort is not what this argument rests on; the disconnect that
+follows it is. Shutdown-by-disconnect is the blunt instrument this argument needs; abort is not.
 
 ## 4. `UnitActivities.Guiding` is the science interlock — no new flag
 
