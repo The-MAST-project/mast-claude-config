@@ -13,8 +13,8 @@
 > branch `unit-startingup-gaps` @ `9a4f420` (the StartingUp / ShuttingDown dispatch flags this
 > plan relies on, §8). Builds the busy predicate of
 > [unit_idleness_design.md](unit_idleness_design.md) first, with three revisions recorded there.
-> Mode names: this plan says **production** / **development** for today's `controlled` /
-> `operated`; the rename is a separate change it does not depend on (§7).
+> Mode names: **production** / **development**, renamed from `controlled` / `operated` on
+> 2026-10-12 (MAST_common#153, MAST_unit#307, mast-claude-config#37; §7).
 
 ## 1. Goals
 
@@ -260,10 +260,10 @@ startup and does not change while the app runs ([opmode.py](../../common/opmode.
 component scope depends on it (§4.1).
 
 The production/development names make the rule self-describing — production: governed by the
-controller, gated; development: an engineer driving components. The rename itself (enum values,
-the config DB documents, `MAST_OPMODE`, the supervisor and the GUI) is cross-repo with a config
-migration, and is the second rename in a week (`automatic` → `operated`, 2026-10-06). It is a
-separate change; this plan works under either set of names.
+controller, gated; development: an engineer driving components. They replaced `controlled` /
+`operated` on 2026-10-12 (MAST_common#153 and its DECISIONS entry). The old values are still read
+with a WARNING, so the gate sees `OpMode.PRODUCTION` / `OpMode.DEVELOPMENT` whichever spelling a
+config document holds.
 
 ## 8. Dependencies already in place
 
@@ -334,7 +334,7 @@ here, so its route list is not in this plan.
    deploy (§12.2), so nothing else would catch a refused call short of a failed night.
 7. **MAST_unit** — replace `refuse_while_shutting_down` with the gate and the claim (§5),
    enforcing; `test_shutdown_gate.py` becomes the admission test suite.
-8. Later, separately: MAST_spec (§10); the production/development rename (§7); the inactivity
+8. Later, separately: MAST_spec (§10); the inactivity
    shutdown (unit_idleness §7).
 
 ## 12. Decisions taken (2026-10-12)
