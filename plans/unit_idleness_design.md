@@ -11,7 +11,7 @@
 > 2026-10-12: `why_not_idle` renamed `why_busy`; `was_shut_down` out of the predicate; computed on
 > demand (endpoint-admission). **2026-10-13 (this version):** the unit shuts *itself* down, on a
 > per-unit configured idle time; `ImagerActivities.CoolingDown` does not count as busy; the
-> clock runs only while `opstate == RUNNING`, in both opmodes, and restarts at `startup`. No
+> clock runs only while `opstate == STARTED_UP`, in both opmodes, and restarts at `startup`. No
 > longer tied to endpoint admission, which is decided separately.
 
 ## 1. Why
@@ -95,8 +95,8 @@ False — correctly: guiding really did stop.
 Two monotonic marks on `Unit`, `idle_since` and `active_since`, maintained by **one evaluation
 per `ontimer` tick** (2 s), which also caches guiding (§5) and runs the auto-shutdown (§7):
 
-- **Only while `opstate == RUNNING`.** In `INITIALIZED` there is nothing to shut down; in
-  `SHUTDOWN` it already is. Outside `RUNNING` both marks are cleared and nothing is published.
+- **Only while `opstate == STARTED_UP`.** In `INITIALIZED` there is nothing to shut down; in
+  `SHUT_DOWN` it already is. Outside `STARTED_UP` both marks are cleared and nothing is published.
 - **Restarted at `startup`.** `startup` is an explicit "I want this unit", so idleness counts
   from when startup finishes (the unit's `StartingUp` ends — a busy interval like any other).
 - **Busy → idle** stamps `idle_since`; **idle → busy** stamps `active_since`. Overlapping
@@ -110,13 +110,15 @@ and still needs a poll; deriving durations at `status()` time has no remembered 
 
 ## 7. Auto-shutdown
 
-On a tick where the unit is `RUNNING`, idle, `minutes_to_autoshutdown_on_idle > 0`, and
+On a tick where the unit is `STARTED_UP`, idle, `minutes_to_autoshutdown_on_idle > 0`, and
 `idle_seconds >= minutes * 60`:
 
 - the unit calls its own `shutdown()` — exactly what `PUT /shutdown` does: abort (nothing to
-  abort, it is idle), close the covers, disconnect, cooler off, `opstate = SHUTDOWN`;
+  abort, it is idle), close the covers, disconnect, cooler off, and `opstate = SHUT_DOWN` once
+  `ShuttingDown` ends;
 - one INFO line says why: `auto-shutdown: idle for 30 min (minutes_to_autoshutdown_on_idle=30)`;
-- it cannot fire twice: the opstate is no longer `RUNNING`, so the clock is cleared.
+- it cannot fire twice: while the shutdown runs the unit is busy (`ShuttingDown`), and once it
+  completes the opstate is `SHUT_DOWN`, so the clock is cleared.
 
 **`shutdown`, not `powerdown`.** Power stays the controller's decision (opmode-design §4a).
 
@@ -152,7 +154,7 @@ With a `{}` default, a new controller reading an old unit would see "nothing kee
 busy" — our encoding for idle. With `None`: `None` unknown (an old unit, or control's fabricated
 `BasicUnitStatus`), `{}` known and idle, non-empty known and busy.
 
-`idle_seconds` is `None` whenever `why_busy` is non-empty, and both are `None` outside `RUNNING`.
+`idle_seconds` is `None` whenever `why_busy` is non-empty, and both are `None` outside `STARTED_UP`.
 
 ## 9. Out of scope
 
@@ -174,9 +176,9 @@ busy" — our encoding for idle. With `None`: `None` unknown (an old unit, or co
 - `why_busy`: a component activity alone is busy; `ImagerActivities.CoolingDown` alone is
   idle; PHD2 guiding with the unit's flag down is busy (via the cache).
 - The clock: busy→idle and idle→busy stamp the marks (fake clock); overlapping activities stay
-  active until the last ends; nothing runs outside `RUNNING`; `startup` restarts it.
+  active until the last ends; nothing runs outside `STARTED_UP`; `startup` restarts it.
 - Auto-shutdown: fires at the configured minutes and not before; logs once; does not fire at 0;
   does not fire twice; a config change applies on the next tick.
 - Config: 0 and 5 load; 1–4 are refused.
-- Status: `idle_seconds` is `None` while busy; all three `None` outside `RUNNING`.
+- Status: `idle_seconds` is `None` while busy; all three `None` outside `STARTED_UP`.
 - On mast00: with a value of 5, a started unit left alone shuts down after 5 minutes.

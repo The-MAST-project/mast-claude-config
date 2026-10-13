@@ -489,7 +489,7 @@ exactly this and app.py already uses it for its startup banner.
 
 ```
 supervisor heartbeat  up 4:12:06  phase=RUNNING
-  role=unit  opmode=production  opstate=running  maintenance=false  config gen=418
+  role=unit  opmode=production  opstate=startedup  maintenance=false  config gen=418
   resources  network=ok  ramdisk=ok (47 indexes)  share=ok
   processes  pwi4=healthy pid=5120 r=0    phd2=healthy pid=7332 r=1
              ps3cli=healthy pid=8044 r=0  app=healthy pid=9160 r=0
