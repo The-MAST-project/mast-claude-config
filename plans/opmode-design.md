@@ -3,7 +3,7 @@
 > How a unit or spec machine reaches its operational state, selected by a new `opmode`
 > field with two values, `development` and `production` (plus `tested`, a CI-only mode selected
 > by environment and never stored); and a reported `opstate` of
-> `initializing` / `initialized` / `running` / `shutdown`. Consumed by the units, the spec, and
+> `initializing` / `initialized` / `startedup` / `shutdown`. Consumed by the units, the spec, and
 > the (not yet built) MAST supervisor. Spans MAST_common, MAST_unit, MAST_spec and
 > MAST_control, which is why it belongs in `mast-claude-config/plans/` rather than one repo.
 >
@@ -35,7 +35,7 @@ is binary `debug`/`production` off a `MAST_DEBUG` env var, has **zero call sites
 so it returns `False` unconditionally. The name is occupied by code that has never run.
 
 **The outcome:** one `opmode` value, resolved from one place, deciding how far a machine takes
-itself on boot — and a reported `opstate` (`initialized` / `running` / `shutdown`, §4) that a
+itself on boot — and a reported `opstate` (`initialized` / `startedup` / `shutdown`, §4) that a
 supervisor, or a test, can poll. Health is not part of it: that stays in the existing
 `operational` and `why_not_operational` fields.
 
@@ -63,9 +63,9 @@ class OpMode(StrEnum):                     # the values a real machine can have
     DEVELOPMENT   = "development"                # a person runs the app; it starts at once
     PRODUCTION = "production"              # the supervisor runs the app; it waits for startup
 
-class OpState(StrEnum):                    # revised 2026-10-06, see §4
+class OpState(StrEnum):                    # revised 2026-10-06 and 2026-10-13, see §4
     INITIALIZING = "initializing"; INITIALIZED = "initialized"
-    RUNNING = "running"; SHUTDOWN = "shutdown"
+    STARTED_UP = "startedup"; SHUT_DOWN = "shutdown"
 
 OPMODE_ENV = "MAST_OPMODE"
 DEFAULT_OPMODE = OpMode.DEVELOPMENT
@@ -246,21 +246,25 @@ directory. That is consistent with the design, not a hole in it: `tested` avoids
 
 ## 4. The reported `opstate`
 
-*Revised 2026-10-06: four lifecycle values replace `standing-by` / `running`.*
+*Revised 2026-10-06: four lifecycle values replace `standing-by` / `running`. Revised
+2026-10-13: `running` / `shutdown` (set on receipt) became `startedup` / `shutdown` (set on
+completion) -- see "Set on completion" below.*
 
 The unit and the spec report two new values in their status: `opmode`, and an `opstate`.
 
 ```
-initializing ──(end of start_lifespan, production)──▶ initialized ──startup──▶ running ⇄ shutdown
-                                                                                startup / shutdown
+initializing ──(end of start_lifespan)──▶ initialized ──startup completes──▶ startedup ⇄ shutdown
+                                                                  startup / shutdown completes
 ```
 
 | value | meaning | set |
 |---|---|---|
 | `initializing` | the process is constructing the machine and bringing it up | in `Unit.__init__` |
-| `initialized` | up, and no lifecycle command received yet: awaiting the first `startup` | at the end of `start_lifespan`, `production` only |
-| `running` | the last lifecycle command received was a `startup` | on receipt of `startup` |
-| `shutdown` | the last lifecycle command received was a `shutdown` | on receipt of `shutdown` |
+| `initialized` | up, and no lifecycle sequence completed yet | at the end of `start_lifespan`, both opmodes |
+| `startedup` | the startup sequence has completed | where `StartingUp` ends, if `startup` is still the latest lifecycle command |
+| `shutdown` | the shutdown sequence has completed | where `ShuttingDown` ends, if `shutdown` is still the latest lifecycle command |
+
+The enum members are `STARTED_UP = "startedup"` and `SHUT_DOWN = "shutdown"`.
 
 **Each value names where the machine is in its lifecycle, and nothing else.** `initialized` and
 `shutdown` are deliberately distinct. The first draft had a single `standing-by` for both, at
@@ -268,7 +272,7 @@ the cost of conflating "never started" with "started and then shut down" -- whic
 physically the same (after a shutdown the mount is parked and its outlet may be cut, and the
 covers are closed). The distinction now costs one enum value and no extra field, and it makes
 the unit-level `was_shut_down` redundant (components keep theirs). `initialized` also says
-something on its own: an app the supervisor believed `running` that now reports `initialized`
+something on its own: an app the supervisor believed `startedup` that now reports `initialized`
 has restarted.
 
 **`initializing` is never seen over HTTP**, and that is accepted (§4a, decided 2026-10-06).
@@ -277,19 +281,21 @@ client can ask, the state has already moved on. It exists so the value is define
 line of `Unit.__init__`, and for logs. To a client, "port not open yet" is how initializing
 looks.
 
-**Transitions out of `initialized`:** `startup` → `running`; `shutdown` → `shutdown` (a
-supervisor making a never-started machine safe). `initialized` is entered once per process and
-never again.
+**Transitions out of `initialized`:** a completed startup → `startedup`; a completed shutdown
+→ `shutdown` (a supervisor making a never-started machine safe). `initialized` is entered once
+per process and never again. Under `development`, `start_lifespan` sets `initialized` and then
+calls `startup()`, so a development unit is `initialized` for the length of its first startup
+rather than visibly `initializing`.
 
 **Repeats are idempotent.** A `shutdown` at a machine already in `shutdown` stays `shutdown`, so
 the supervisor's "make safe" path can be sent blindly.
 
-**`opstate` says which lifecycle command the machine is living under, not whether it is
+**`opstate` says which lifecycle sequence the machine last completed, not whether it is
 healthy.** Health stays exactly where it already is: `operational` and `why_not_operational` on
 the same status object. There is no `failed` and no `ready`: a unit that came up with
 `_init_errors` is `initialized` *and* `operational: false`, which is more informative than
-either alone, and "started and working" is `running` and `operational` (§11, no `READY`). That
-is also why the running state is called `running` and not `operational`:
+either alone, and "started and working" is `startedup` and `operational` (§11, no `READY`). That
+is also why the started state is called `startedup` and not `operational`:
 `ComponentStatus.operational` is an existing bool meaning "detected, connected, no complaints",
 and it is `True` in `initialized` too.
 
@@ -307,23 +313,33 @@ named after a resting state to clear waits for ever.
 A read-only property over one private attribute, with **one writer per transition**:
 
 - `_opstate = INITIALIZING` at the start of `Unit.__init__`, in **all** modes
-- `→ INITIALIZED` at the end of `Unit.start_lifespan`, in `production` only (in `development`,
-  `start_lifespan` calls `startup()` instead, which sets `RUNNING`)
-- `→ RUNNING` on entry to `startup()` ([unit.py:264-273](../../unit/src/unit.py#L264)),
-  before the thread is spawned
-- `→ SHUTDOWN` on entry to `shutdown()` ([unit.py:304-315](../../unit/src/unit.py#L304))
+- `→ INITIALIZED` at the end of `Unit.start_lifespan`, in both opmodes (under `development`,
+  `start_lifespan` then calls `startup()`)
+- `→ STARTED_UP` in `Unit.ontimer`, where it ends `StartingUp` (startup dispatch finished and no
+  component `StartingUp` left), if `startup` is still the latest lifecycle command
+- `→ SHUT_DOWN` in `Unit._end_shutting_down_when_done`, where it ends `ShuttingDown`, if
+  `shutdown` is still the latest lifecycle command
 
-**Transitions fire on receipt of the command, not on its completion** -- "got a startup" is the
-requirement's own wording, and it keeps `opstate` independent of `ontimer`, which §5.2 shows is
-exactly the machinery that can stop running. A supervisor that needs "startup finished, and it
-worked" polls `operational`, or waits on the `x-completion: activity:StartingUp` contract the
-endpoint already publishes. That is one fact per field rather than one field trying to carry
-liveness, progress and health at once.
+`startup()` and `shutdown()` change no opstate; on receipt they only record which lifecycle
+command is now the latest (`_last_lifecycle_command`).
+
+**Set on completion, not on receipt** -- *decided 2026-10-13, superseding the 2026-10-06 "on
+receipt" rule.* The opstate is the lifecycle state the machine has **reached**; the transition
+in between is shown by the `StartingUp` / `ShuttingDown` activities, which already exist for
+exactly that. Only the latest lifecycle command completes into a state, so a `shutdown` received
+mid-startup ends in `shutdown` and is not overwritten by the startup finishing after it (and the
+converse). No legacy alias was kept for `running`: unit and common are pulled together.
+
+The trade the 2026-10-06 rule avoided is now accepted: the transitions depend on `ontimer`
+(§5.2), since that is where `StartingUp` and `ShuttingDown` end. A stalled `ontimer` shows as
+a `StartingUp` / `ShuttingDown` that never clears, which the supervisor bounds as it bounds
+every other wait (§11). "Startup finished, and it worked" is `opstate == "startedup"` and
+`operational`.
 
 The supervisor loop: power the computer (and, under `production`, start the app) → poll until the
-port answers with `opstate == "initialized"` → `PUT /startup` → poll until `operational` → work
-→ `PUT /shutdown` → poll until `opstate == "shutdown"` and `ShuttingDown` has cleared →
-optionally `PUT /powerdown`.
+port answers with `opstate == "initialized"` → `PUT /startup` → poll until `opstate ==
+"startedup"` (then `operational` for health) → work → `PUT /shutdown` → poll until `opstate ==
+"shutdown"` → optionally `PUT /powerdown`.
 
 The mode is resolved **once, on first read** — in practice by `start_lifespan`, before uvicorn
 opens its port — and cached for the life of the process (`OpmodeBase.opmode`; `_opmode` is
@@ -362,19 +378,21 @@ never the app, and it refuses `production` for a role until that role's stage 3 
    `create_app(unit)` then includes the routes of the components that exist.
 2. **`app.lifespan`** calls the top component's `start_lifespan()`, yields while the app
    serves, then calls its `end_lifespan()`. This is the unit's shape today.
-3. **`start_lifespan()`**: under `development`, calls `startup()` (→ `RUNNING`); under
-   `production`, sets `opstate = INITIALIZED` and returns, leaving the machine to wait for the
-   `startup` endpoint.
+3. **`start_lifespan()`** sets `opstate = INITIALIZED`. Under `development` it then calls
+   `startup()`; under `production` it returns, leaving the machine to wait for the `startup`
+   endpoint.
 4. **The opmode is read in one place: the top component.** Components do not branch on it. A
    per-component check would start a component before its siblings exist, and makes a component
    unconstructible without a parent's mode. The existing checks in `mount.py` (lines 178, 287,
    316, 361 on 2026-10-05) move up into `Unit` as part of this.
-5. **`startup()`** (the top component's endpoint) sets `opstate = RUNNING` on receipt (§4),
-   then asks each component to start, each independently (§5.1). A component's `startup()`
+5. **`startup()`** (the top component's endpoint) records itself as the latest lifecycle
+   command and asks each component to start, each independently (§5.1); the opstate becomes
+   `STARTED_UP` when `StartingUp` ends (§4). A component's `startup()`
    tries to make it operational; whether it succeeded is reported in `operational` /
    `why_not_operational`, not in `opstate`.
-6. **`shutdown()`** sets `opstate = SHUTDOWN` on receipt, aborts in-flight work (§5.3), then
-   asks each component to shut down. A component's `shutdown()` performs its shutdown
+6. **`shutdown()`** records itself as the latest lifecycle command, aborts in-flight work
+   (§5.3), then asks each component to shut down; the opstate becomes `SHUT_DOWN` when
+   `ShuttingDown` ends (§4). A component's `shutdown()` performs its shutdown
    activities, sets `_was_shut_down = True`, and calls its own `powerdown()` if
    `power_down_on_shutdown` is set.
 7. **`end_lifespan()`** calls the top component's `shutdown()`, waits for `ShuttingDown` to
@@ -392,7 +410,7 @@ attributes-only half and a `bring_up()`. What the chosen design accepts in retur
   the lifespan's startup half before it opens its port (`uvicorn/server.py` `Server.startup`:
   `await self.lifespan.startup()` precedes `create_server`; checked in 0.50.1). So
   `initializing` is never observed over HTTP, and the first state a client ever sees is
-  `initialized` (or `running`, under `development`).
+  `initialized`, in both opmodes.
 - **A hung constructor looks like a dead process** -- no port, no `why_not_operational`. The
   supervisor bounds its wait for the port, as it bounds every other wait (§11: timeouts belong
   to the supervisor).
@@ -402,7 +420,7 @@ attributes-only half and a `bring_up()`. What the chosen design accepts in retur
   the unit says why in `_init_errors` and `why_not_operational`.
 
 **No `READY` state** -- *decided 2026-10-06*. "Startup received and every component
-operational" is `opstate == RUNNING and operational`, two fields the supervisor already reads. A
+operational" is `opstate == STARTED_UP and operational`, two fields the supervisor already reads. A
 `READY` would fold health into `opstate`, against §4, and would need exit transitions for a
 component that fails later in the night -- detected by `ontimer`, the machinery §5.2 shows can
 stop.
@@ -568,15 +586,17 @@ exists. The `tested` half is shared outright: same `tested_router`, same two rou
 - `unit/tests/test_startup_contains_a_component_failure.py` — one component raises; every
   other is still attempted, the failure lands in `self.errors`, `StartingUp` is ended.
 - `unit/tests/test_shutdown_then_startup_again.py` — `do_shutdown` no longer cancels the
-  timer or sets the event; **start → shut → start ends `running` with `operational` true**
+  timer or sets the event; **start → shut → start ends `startedup` with `operational` true**
   (the §5.2 regression guard); `end_lifespan` does both.
 - `unit/tests/test_opstate_transitions.py` — `initializing` from the start of `__init__`;
-  `initialized` after `start_lifespan` under `production`, even with `_init_errors` set (health
-  belongs to `operational`, not `opstate`); `running` on entry to `startup()` **before** the
-  thread finishes; `shutdown` on entry to `shutdown()`, from `initialized` as well as from
-  `running`; **a `shutdown` from `shutdown` stays `shutdown`** (idempotence); `startup` from
-  `shutdown` → `running`; and `model_dump()` emitting the bare lower-case literals, which a JS
-  consumer depends on.
+  `initialized` after `start_lifespan` in both opmodes (development with `StartingUp` already
+  up), even with `_init_errors` set (health belongs to `operational`, not `opstate`); no opstate
+  change on receipt of `startup()` / `shutdown()`; `startedup` once `ontimer` ends `StartingUp`,
+  and not while startup is still dispatching; `shutdown` once `ShuttingDown` ends, from
+  `initialized` as well as from `startedup`; **a `shutdown` received mid-startup ends
+  `shutdown`**, and a `startup` received mid-shutdown ends `startedup`; a repeated `shutdown` is
+  idempotent; and `model_dump()` emitting the bare lower-case literals, which a JS consumer
+  depends on.
 
 Add `common.opmode` to `CORE` in `common/tests/test_imports.py:37-42`.
 
@@ -596,10 +616,12 @@ of `endpoint_powerdown` is forgotten; `test_activity_flag_balance.py` demands a 
 2. `MAST_OPMODE=production python src/app.py` → `GET /mast/api/v1/unit/status` reports
    `opstate: "initialized"`, `opmode: "production"`. **Confirm physically: covers shut, mount not
    homed, stage not at `Sky`, focuser unmoved.**
-3. `PUT /startup` → `opstate` goes `running` immediately; covers open, mount homes, stage moves;
-   `operational` goes `true` once `StartingUp` clears.
-4. `PUT /shutdown` → `opstate` becomes `shutdown`; covers close, mount parks.
-5. **`PUT /startup` again → `running`, and `operational` goes `true` a second time.** This is
+3. `PUT /startup` → `opstate` stays `initialized` while `StartingUp` is up; covers open, mount
+   homes, stage moves; `opstate` goes `startedup` and `operational` goes `true` once `StartingUp`
+   clears.
+4. `PUT /shutdown` → `opstate` stays `startedup` while `ShuttingDown` is up; covers close, mount
+   parks; then `opstate` becomes `shutdown`.
+5. **`PUT /startup` again → `startedup`, and `operational` goes `true` a second time.** This is
    the cycle that is broken today; if `operational` never returns, §5.2 did not land.
 6. `PUT /powerdown` → component outlets off, process still serving, `Computer` outlet untouched.
 7. Unset `MAST_OPMODE`, restart → `development`, byte-identical behaviour to today.
@@ -636,7 +658,7 @@ provisioning. Harmless, unread, and it returns on the next provision run until
 MAST_provisioning stops setting it.
 
 **No startup deadline.** A component that wedges leaves `StartingUp` set and the unit sits
-`running` and never `operational`. The unit does not impose its own timeout — the supervisor
+`initialized` (or its previous state), never `startedup` or `operational`. The unit does not impose its own timeout — the supervisor
 does, because it is the party that knows how long it is willing to wait and what to do next
 (`shutdown` and retry, or take the unit out of the pool). This keeps the unit's job to
 reporting truthfully rather than guessing.
@@ -682,8 +704,15 @@ merge, pull `common` everywhere, then update the documents. See §2.
 **The opmode is resolved lazily, on first read** (2026-10-06), not in `Unit.__init__`. First read
 is `start_lifespan`, before the port opens; `resolve_opmode()` never raises. See §4.
 
-**No `READY` opstate** (2026-10-06). See §4a: `RUNNING and operational` already says
-"started and working", and a `READY` would bring health into `opstate`.
+**No `READY` opstate** (2026-10-06). See §4a: `RUNNING and operational` (now `STARTED_UP and
+operational`) already says "started and working", and a `READY` would bring health into `opstate`.
+
+**The opstate is the lifecycle state reached: `STARTED_UP` / `SHUT_DOWN`, set on completion**
+(2026-10-13). `RUNNING = "running"` / `SHUTDOWN = "shutdown"`, set on receipt of the command,
+became `STARTED_UP = "startedup"` / `SHUT_DOWN = "shutdown"`, set where `StartingUp` /
+`ShuttingDown` end, and only by the latest lifecycle command. `INITIALIZED` is now reported in
+both opmodes. No transition period: no alias for `running`, and unit and common roll out
+together (MAST_common#160, MAST_unit#323). See §4.
 
 **The operator starts the app under `development`; the supervisor only under `production`**
 (2026-10-06). Keeps the supervisor plan's existing decision. See §4a.
@@ -708,10 +737,9 @@ Not decisions — work that could not be done from the machine this was written 
 3. **MAST_provisioning** — stop setting `MAST_PROJECT` machine-wide, and clear the existing
    value on the fleet. Unrelated to this plan's behaviour; noted because it is the last live
    trace of the variable.
-4. **Rename `OpState` in the code.** `common/opmode.py` has `STANDBY` / `RUNNING`; this plan now
-   specifies `INITIALIZING` / `INITIALIZED` / `RUNNING` / `SHUTDOWN` (§4). Nothing is on the
-   wire yet, and the only uses outside `common` are two lines in `unit/src/mount.py` (288,
-   316), which move into `Unit` anyway (§4a).
+4. ~~**Rename `OpState` in the code.**~~ Done (MAST_common#145, MAST_unit#297), and renamed
+   again on 2026-10-13 to `STARTED_UP` / `SHUT_DOWN` (§4). Still open: MAST_control / MAST_gui /
+   MAST_spec consumers of `opstate == "running"`, which were not checked from mast00.
 
 ## Provenance
 
@@ -741,6 +769,9 @@ config-DB field defaulting to `False`; construction left before uvicorn, accepti
 `OpMode` and `OpState`; and `automatic` renamed `operated` (Arie's choice over `manual`). A
 background bring-up thread was weighed and declined for simplicity -- the trade-off is set out
 in §4a.
+
+**Revised 2026-10-13** with Arie, in session: the opstate set on completion, not on receipt,
+and `RUNNING` / `SHUTDOWN` renamed `STARTED_UP` / `SHUT_DOWN` (§4).
 
 The `opmode`, `standby` and `standdown` identifiers were verified to have zero occurrences in
 either repo before being chosen.
