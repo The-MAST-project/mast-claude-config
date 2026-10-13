@@ -1,314 +1,182 @@
-# Unit idleness: how long has a unit had nothing to do
+# Unit idleness, and shutting down an idle unit
 
-> Two monotonic marks on `Unit` (`active_since`, `idle_since`), maintained by a single
-> evaluation in `Unit.ontimer`, and published in `FullUnitStatus` as `idle_seconds`,
-> `active_seconds` and `why_not_idle`. The consumer is an inactivity shutdown: MAST_control
-> decides normally, and the unit's own timer is a failsafe for when control is unreachable.
+> The unit measures how long it has had nothing to do and, if configured, shuts itself down
+> after `minutes_to_autoshutdown_on_idle`. Busy-ness is one predicate, `Unit.why_busy`; the idle
+> clock is two marks kept in `Unit.ontimer`; both are published in `FullUnitStatus`.
 >
-> **Status: plan only — not implemented; all design questions closed.** Needs no new activity
-> flag, no change to `Activities` or `Component`, and no override of `start_activity` /
-> `end_activity` — three mechanisms that were each designed and then rejected (§5). Code
-> baseline: MAST_common `master` @ `2a9ff59`, MAST_unit `main` @ `dcefc18`, 2026-10-06.
-> Branch `feat/active-idle-since` exists in MAST_unit, empty.
+> **Status: plan only — not implemented; all design questions closed (rev. 2026-10-13).**
+> Code baseline: MAST_common `master` @ `20c1548`, MAST_unit `main` @ `4f403e8`.
 >
-> **Revised 2026-10-12 by [endpoint-admission-design.md](endpoint-admission-design.md)**, which
-> needs the same busy predicate at request time and so builds it first (its phase 1). Three
-> changes to this plan follow from it, and win where the two disagree:
->
-> - `why_not_idle` is named **`why_busy`**, beside `Unit.is_busy` / `Unit.is_idle`.
-> - `not was_shut_down` moves **out** of the predicate. `is_idle` is exactly `not is_busy`, so
->   with that term a shut-down unit would read as busy. Inactivity-shutdown eligibility is
->   `is_idle and not was_shut_down`, stated where it is used (§7), not folded into idleness.
-> - `why_busy` is computed **on demand** from in-memory flags, not once per `ontimer` tick:
->   the admission gate cannot tolerate a 2 s stale answer. The marks stay in `ontimer`. The
->   guiding term reads a cached `guider.is_guiding` refreshed there, since PHD2's answer is a
->   socket round-trip (endpoint-admission §3.2).
+> **Revisions.** 2026-10-06: first version (the unit as a failsafe behind MAST_control).
+> 2026-10-12: `why_not_idle` renamed `why_busy`; `was_shut_down` out of the predicate; computed on
+> demand (endpoint-admission). **2026-10-13 (this version):** the unit shuts *itself* down, on a
+> per-unit configured idle time; `ImagerActivities.CoolingDown` does not count as busy; the
+> clock runs only while `opstate == RUNNING`, in both opmodes, and restarts at `startup`. No
+> longer tied to endpoint admission, which is decided separately.
 
 ## 1. Why
 
-Nothing today answers "how long has this unit had nothing to do". The information is almost
-all present — `FullUnitStatus` nests every component's `activities_verbal`, and the unit's own
-flags are on the envelope — but it is a snapshot with no history, so no consumer can act on
-duration.
+A unit left running with nothing to do keeps its covers open, its mount energised, its cooler
+on. Nothing today notices: `FullUnitStatus` shows a snapshot of activities but no history, so no
+consumer can act on *how long* nothing has happened.
 
-Two consumers want that duration, and both want to *power something down* on the strength of
-it:
+The cost of a wrong answer is asymmetric. Reading "idle" while the unit works stops science;
+reading "busy" while it is idle only wastes power and wear. Every choice below leans to "busy".
 
-- **MAST_control** may shut down a unit, or a group, idle for longer than some period.
-- **The unit's own timer** may shut itself down, as a failsafe.
+## 2. Configuration
 
-That is what makes this more than a status nicety. The field is an input to turning a telescope
-off, so the cost of a wrong answer is asymmetric: reading "idle" when the unit is working loses
-science, while reading "busy" when it is idle only wastes power.
-
-## 2. What "idle" means
-
-```
-idle  ⇔  not was_shut_down
-      ∧  Unit.activities == 0
-      ∧  no component reports an activity
-      ∧  not guider.is_guiding
+```python
+# UnitConfig (MAST_common config/unit.py), top-level beside opmode and power_down_on_shutdown
+minutes_to_autoshutdown_on_idle: int = 0   # 0 disables; otherwise at least 5
 ```
 
-Each term earns its place:
+- **0 disables auto-shutdown**, and is the default: a unit whose config holds no value never
+  shuts itself down. This is also the off switch for an engineering session.
+- **Otherwise at least 5**, enforced by a validator, so the config fails to load with a clear
+  message rather than a unit shutting down a minute after its last command.
+- **Read live** each `ontimer` tick, so an edit takes effect without a restart.
 
-- **`not was_shut_down`.** A shut-down unit is idle by definition, so without this term the
-  predicate stays true for ever and an inactivity shutdown re-fires on every poll.
-  `do_shutdown` already sets `_was_shut_down` and `ComponentStatus` already publishes it.
-- **`Unit.activities == 0`** covers the unit's own work: `Acquiring`, `Positioning`
-  (`acquirer.py`), `Autofocusing`, `AutofocusingPWI4`, `AutofocusAnalysis`
-  (`autofocusing.py`), `Solving`, `Correcting` (`solving.py`), `FluxMetering`
-  (`flux_metering/session.py`), `Calibrating` (`imaging/stage_geometry.py`), `Dancing`,
-  `Exposing`, `StartingUp`, `ShuttingDown` (`unit.py`).
-- **Component activities** cover what the unit level cannot see. Every `UnitActivities` flag
-  comes from unit-level code, so a direct `PUT /mount/goto_ra_dec_j2000`, `PUT /imager/expose`,
-  or a focuser, stage or covers move sets **no unit flag at all**. Without this term an
-  engineering night — an operator driving components directly — reads as idle throughout.
-- **`guider.is_guiding`** is the science interlock. See §4.
+## 3. Busy: `why_busy`
 
-A component that cannot be read is **not** a term here. That is what `operational` and
-`why_not_operational` are for, and routing it there keeps `why_not_idle` purely about activity.
+```python
+Unit.why_busy -> dict[str, list[str]]   # {"unit": ["Guiding"], "covers": ["Closing"]}; {} when idle
+Unit.is_busy  -> bool                   # bool(why_busy)
+Unit.is_idle  -> bool                   # not is_busy
+```
 
-## 3. Tracking is not an activity, and a tracking unit with no claim on it is idle
+One entry per owner with something active, valued from that owner's `activities_verbal`:
 
-`Mount.is_tracking` ([mount.py:446](../../unit/src/mount.py#L446)) is a **state**: it has no
-start, no end and no duration. Activities in this codebase carry `Timing` and a start/end
-lifecycle, so forcing tracking into that shape would be modelling it wrongly.
+- **`"unit"`** — `UnitActivities`. Every one is unit-level work.
+- **each component** — mount, covers, focuser, stage, imager (the wrapper's flags *and* its
+  backend's). A direct `PUT /mount/goto_ra_dec_j2000` or a covers move raises no unit flag, so
+  without this a development session would read as idle throughout.
+- **guiding** — see §5.
 
-More than that, it should not appear in the predicate at all. Tracking with nothing claiming
-the unit is **residue, not work** — the mount was left tracking after whatever was using it
-finished. Treating it as "busy" would mean a unit could never become shutdown-eligible until
-someone remembered to stop tracking.
+**Excluded: `ImagerActivities.CoolingDown`.** The camera cooling to its set point after
+`startup` (a minute or two) is the camera preparing, not the unit doing something for someone.
+It keeps the imager non-operational (MAST_unit#320) but does not count as busy.
 
-This is safe because **shutdown stops tracking unconditionally**, and by a route that does not
-depend on getting anything subtle right:
+**Keyed by owner, never by unioned integers.** Flag names repeat across enums (`StartingUp` in
+10, `ShuttingDown` in 10) and their bit values overlap, so only the verbal form under a
+structural key is a sound union.
 
-- `do_shutdown` calls `comp.shutdown()` for every component (`unit.py:308`).
-- `Mount.shutdown()` disconnects, and its docstring is explicit: *"**No park.** MAST has no
-  defined park position: disconnecting disables both axes…"* Disabled axes cannot track.
+**Computed on demand** from in-memory flags (each owner's `Activities.lock`, no hardware
+access). The one exception is guiding (§5).
 
-Note it is **not** `Unit.abort()` that does this, and it is just as well. `do_shutdown` *does*
-call `abort` first (opmode-design 5.3, to stop in-flight work before the covers close; this
-section originally said it did not, which stopped being true when 5.3 landed), but abort
-deliberately *may leave tracking running*: it reuses the acquisition/guiding stop verb,
-*"notably the `was_tracking_before_guiding` rule, which decides whether tracking is left running
-and is easy to get wrong"*. So the abort is not what this argument rests on; the disconnect that
-follows it is. Shutdown-by-disconnect is the blunt instrument this argument needs; abort is not.
+`Unit.is_idle` overrides the inherited `Activities.is_idle` (the unit's own flags only); its
+one existing caller gets the stricter answer.
 
-## 4. `UnitActivities.Guiding` is the science interlock — no new flag
+## 4. Tracking is not busy
 
-The unit's "my light is being used" signal has to cover the case local introspection cannot
-see: the spectrograph integrating on this unit's fibre, which the unit knows nothing about.
+`Mount.is_tracking` is a state with no start or end. A mount left tracking after its work is
+**residue, not work**, and counting it would keep a unit from ever going idle until someone
+remembered to stop it. Safe to ignore, because **shutdown stops tracking unconditionally**:
+`Mount.shutdown()` disconnects, which disables both axes. (`Unit.abort()`, which shutdown also
+calls, may leave tracking running — the `was_tracking_before_guiding` rule — so the disconnect,
+not the abort, is what this rests on.)
 
-A new `UnitActivities.DoingScience`, set on assignment and released by control, was designed
-for this and **rejected in favour of the `Guiding` flag that already exists** — started at
-[phd2.py:1487](../../unit/src/phd2/phd2.py#L1487) and
-[solving_guider.py:56](../../unit/src/solving_guider.py#L56), ended at `solving_guider.py:95`,
-and stopped by `Unit.abort()` at `unit.py:622` whenever `Acquiring` or `Guiding` is active.
+## 5. Guiding is busy: the science interlock
 
-Four reasons:
+While guiding, this unit's light is being used: the spectrograph is integrating on its fibre,
+something the unit cannot otherwise see. Guiding stops if anything ends the session, and
+guiding is coextensive with the exposure (a drift off the fibre ruins it anyway), so "guiding"
+and "in use" are the same interval. *(Premise: no unguided science. If that changes, revisit.)*
 
-1. **Guiding is coextensive with the exposure.** If guiding stops mid-integration the target
-   drifts off the fibre and the spectrograph's exposure is ruined anyway. "Guiding" and "my
-   light is in use" are the same interval in practice. *(Premise: no unguided science is
-   foreseen. If that changes, this section is the first thing to revisit.)*
-2. **No enum change.** `UnitActivities` is append-only and shared with MAST_control and
-   MAST_gui, where a renumbering silently changes what a numeric comparison means. It also
-   avoids a live collision: on `master` the enum ends at `FluxMetering = 16384`, and
-   `StabilityCampaigning = 32768` exists on the unmerged mount-stability branch — a
-   `DoingScience` landing first would take 32768 and force that branch to move. The same
-   collision was already resolved once, on 2026-10-01.
-3. **No lease machinery.** `DoingScience` needed renewal, an expiry, a rule for who may end it
-   and a timeout constant. All of it existed only to survive control dying or a unit
-   restarting.
-4. **It is backed by observable external state, so the restart hole closes by itself.**
-   `DoingScience` was pure intent: in memory, lost on restart, hence the lease. PHD2 is a
-   separate process that survives a unit restart, and `Guider.is_guiding`
-   ([guiding.py:249](../../unit/src/guiding.py#L249)) delegates to the backend, which answers
-   truthfully per backend: `PHD2Connector.is_guiding` reads PHD2's live `app_state`
-   ([phd2.py:1390](../../unit/src/phd2/phd2.py#L1390)), while `SolvingGuider.is_guiding`
-   returns the flag (`solving_guider.py:102`), which for an in-process guider *is* the truth.
+The predicate asks **`guider.is_guiding`** — for PHD2, its live `app_state` — **or**
+`UnitActivities.Guiding`. Either true reads busy, so a divergence between the flag and PHD2
+fails safe. `PHD2Connector.is_guiding` is a socket round trip, so `ontimer` caches it each tick
+(`_guiding_live`) and `why_busy` reads the cache, at most 2 s old.
 
-**So the predicate asks `guider.is_guiding`, not `is_active(UnitActivities.Guiding)`.** For
-PHD2 the flag is a *mirror* of `app_state`, not the source, and the two can diverge:
+Since MAST_unit#308, a PHD2 that drops its connection reads disconnected, and `is_guiding` is
+False — correctly: guiding really did stop.
 
-| | consequence |
-|---|---|
-| flag true, PHD2 not guiding | unit looks busy; shutdown never fires — **fail-safe** |
-| flag false, PHD2 guiding | unit looks idle **while guiding** — the dangerous one |
+## 6. The idle clock
 
-Asking the interface lets the live state win, and gets restart recovery for nothing. This is a
-known-live problem area: MAST_unit#250 is *"phd2: stop answering from remembered state"* and
-#275 is PHD2 answering after the guide camera is unpowered.
+Two monotonic marks on `Unit`, `idle_since` and `active_since`, maintained by **one evaluation
+per `ontimer` tick** (2 s), which also caches guiding (§5) and runs the auto-shutdown (§7):
 
-## 5. One evaluation point: `Unit.ontimer`
+- **Only while `opstate == RUNNING`.** In `INITIALIZED` there is nothing to shut down; in
+  `SHUTDOWN` it already is. Outside `RUNNING` both marks are cleared and nothing is published.
+- **Restarted at `startup`.** `startup` is an explicit "I want this unit", so idleness counts
+  from when startup finishes (the unit's `StartingUp` ends — a busy interval like any other).
+- **Busy → idle** stamps `idle_since`; **idle → busy** stamps `active_since`. Overlapping
+  activities (`Acquiring` then `Solving`, ending `Acquiring` first) leave the unit active until
+  the last one ends.
 
-The marks are maintained by the existing 2 s `RepeatTimer`
-([unit.py:234](../../unit/src/unit.py#L234)), which evaluates the whole predicate each tick and
-stamps a mark when it flips. 2 s granularity is irrelevant for a quantity thresholded at tens
-of minutes, and `ontimer` is already where derived state and flag-ending live.
+Three alternatives were weighed and rejected in the 2026-10-06 version, and the reasons stand:
+overriding `start_activity` / `end_activity` sees only unit-level transitions; components pushing
+into the unit has no correct place to hook (MAST_spec's components share the ABC with no unit)
+and still needs a poll; deriving durations at `status()` time has no remembered transition.
 
-Three other mechanisms were designed and rejected:
+## 7. Auto-shutdown
 
-**(a) Overriding `Unit.start_activity` / `end_activity`.** This was the original idea and it
-works — `Component(ABC, Activities)`, `Unit(Component)`, nothing in `Activities` calls
-`self.end_activity`, so a `super()` call is clean. It was rejected because those overrides see
-only *unit-level* transitions, so they cannot maintain a predicate that includes components.
-Concretely: the mount slews on a direct call, no unit flag changes, neither override fires, and
-the status publishes `idle_seconds: 1840` beside `why_not_idle: {"mount": ["Slewing"]}` — two
-fields contradicting each other once per transition.
+On a tick where the unit is `RUNNING`, idle, `minutes_to_autoshutdown_on_idle > 0`, and
+`idle_seconds >= minutes * 60`:
 
-An asymmetric variant is sound — `start_activity` may stamp *active* (a running unit activity
-proves not-idle locally), while `end_activity` must do nothing (unit flags at zero prove
-nothing about components) — but it buys only ~2 s of latency and adds a second writer to the
-same two fields from arbitrary threads. Not worth a lock and a precedence rule.
+- the unit calls its own `shutdown()` — exactly what `PUT /shutdown` does: abort (nothing to
+  abort, it is idle), close the covers, disconnect, cooler off, `opstate = SHUTDOWN`;
+- one INFO line says why: `auto-shutdown: idle for 30 min (minutes_to_autoshutdown_on_idle=30)`;
+- it cannot fire twice: the opstate is no longer `RUNNING`, so the clock is cleared.
 
-**(b) Components pushing into the unit.** `Mount`, `Covers` and `Stage` all take
-`unit: "Unit"`, so a component could bump the unit's marks from its own `start_activity` /
-`end_activity`. Rejected because:
+**`shutdown`, not `powerdown`.** Power stays the controller's decision (opmode-design §4a).
 
-- it still cannot see tracking, so a poll would be needed anyway — two mechanisms where one
-  suffices;
-- the hook has nowhere correct to live. `Component.__init__(self, activities_type)` knows
-  nothing of a unit, and MAST_spec's components subclass the same ABC with no unit at all, so a
-  hook there must be optional and duck-typed, i.e. a silent no-op when unwired. Not
-  hypothetical even inside the unit: `Focuser.__init__(self, unit=None)` already defaults to
-  none;
-- "is anything *else* still busy" is a fan-out read regardless — the poll, run per transition
-  instead of per tick, and so more often;
-- these fire from PHD2 callbacks, timers and acquisition threads, so every hook would need a
-  lock and would risk deadlock if invoked while a component holds its own `Activities.lock`.
+**Both opmodes.** A development session that should not end on its own sets the unit's value
+to 0.
 
-**(c) Deriving everything at `status()` time, with no marks.** Rejected: a duration needs a
-remembered transition instant, and `status()` is called at the caller's whim.
+MAST_control may still decide to shut units down on its own criteria (plans, weather); that is
+its business and goes through the same `PUT /shutdown`. The unit's own rule needs no controller.
 
-## 6. What is published
+## 8. What is published
 
-Three optional fields on `FullUnitStatus`
-([statuses.py:770](../../common/models/statuses.py#L770)) — and nothing else in MAST_common:
+Three optional fields on `FullUnitStatus` (MAST_common `models/statuses.py`), beside `opmode` /
+`opstate`:
 
 ```python
 idle_seconds:   float | None = None
 active_seconds: float | None = None
-why_not_idle:   dict[str, list[str]] | None = None
+why_busy:       dict[str, list[str]] | None = None
 ```
 
-**Durations, not the monotonic marks.** `time.monotonic()` is seconds since an arbitrary epoch,
-meaningful only inside the process and reset by a restart; a consumer receiving
-`active_since: 183472.6` can do nothing with it. This follows the rule `Timing` already states:
-*"The timestamps stay for reporting; only the elapsed measurement needs a clock that cannot
-move."* Monotonic internally for the arithmetic, durations on the wire.
-
-**`why_not_idle` is a dict keyed on `"unit"`, `"mount"`, … and valued from `activities_verbal`.**
-A flat list of `"mount: Slewing"` strings was considered, to match `why_not_operational`'s
-shape, and the dict is better here: the names collide badly across enums — `StartingUp` appears
-in 10, `ShuttingDown` in 10, `Exposing` in 8, `Aborting` in 8 — so a structural key solves by
-construction what string qualification would solve by convention. The same evaluation produces
-the dict and the marks, so the two cannot disagree.
-
-`why_not_idle["unit"]` duplicates `FullUnitStatus.activities_verbal`, inherited from
-`ComponentStatus`. That is deliberate: it makes the dict self-contained so no consumer has to
-special-case the unit's own entry alongside its components'.
-
-**Never union the `activities` integers.** The enums are separate and their bit values overlap,
-so an integer OR across components is meaningless. The verbal form is the only sound union.
-
-**Build it from values `status()` has already collected**, not by re-reading components.
-`status()` isolates each component read precisely so one sick component cannot cost the whole
-response — a crossed PHD2 reply took the unit's entire status down on 2026-09-08 (MAST_unit#222).
-A union that re-polled would reintroduce that single point of failure.
+**Durations, not marks** — a monotonic timestamp means nothing outside the process.
 
 ### `None` means unknown, and that is load-bearing
 
-All three default to `None`, and `why_not_idle` **must not** default to `{}`. The status models
-set no `extra=`, so pydantic ignores unknown keys, which makes the two skew directions behave
-differently:
+`why_busy` must **not** default to `{}`. The status models ignore unknown keys, so:
 
-| | effect | a caller's `hasattr` guard |
-|---|---|---|
-| old control, new unit | extra keys dropped; attribute absent | **works** |
-| new control, old unit | control's model has the fields, so **defaults apply** | **inert** |
-
-In the second case a `{}` default would be read as *"nothing is keeping this unit busy"* —
-our encoding for idle — so a freshly-deployed control talking to a not-yet-updated unit could
-shut down a unit that is actively guiding. With `None`:
-
-- `None` → **unknown**: an old unit, or control's fabricated `BasicUnitStatus`
-- `{}` → known, and idle
-- non-empty → known, and busy
-
-A forgotten guard then yields "unknown" rather than "idle": defensive by construction rather
-than by convention, which matters because the guards are caller discipline spread across
-repos. Same reasoning as `ConfigHealth` reporting degraded rather than letting a stale boot
-cache look normal.
-
-**`BasicUnitStatus` gets nothing.** It is control's fabrication on behalf of a unit that will
-not answer, so it never carries these fields — and a unit that is not answering is not
-idle-eligible on inactivity grounds. Whatever is done about a silent unit is a different
-decision, and a rule written as `if idle_seconds > threshold` against a missing value is one
-careless line from treating silence as eternal idleness.
-
-## 6a. Why nothing else goes to MAST_common
-
-| | why not |
+| | effect |
 |---|---|
-| `activities.py` | no new enum member — §4 is what buys that |
-| `ComponentStatus` | unit-scoped by decision, so MAST_spec's components stay untouched |
-| `BasicUnitStatus` | see above |
-| a new type alias | `dict[str, list[str]]` is plain. **Not** `ActivitiesVerbal`, which is `list[str] \| None`, and these values are non-empty by construction |
-| config models | the failsafe threshold is control-side and out of scope (§8) |
+| old consumer, new unit | the extra keys are dropped |
+| new consumer, old unit | the consumer's model has the fields, so **defaults apply** |
 
-## 7. Shutdown authority
+With a `{}` default, a new controller reading an old unit would see "nothing keeps this unit
+busy" — our encoding for idle. With `None`: `None` unknown (an old unit, or control's fabricated
+`BasicUnitStatus`), `{}` known and idle, non-empty known and busy.
 
-Two actors can act on this, so they need a hierarchy rather than a race.
+`idle_seconds` is `None` whenever `why_busy` is non-empty, and both are `None` outside `RUNNING`.
 
-**MAST_control decides normally.** It is the only thing that can see the plan queue and the
-spectrograph, and it is the actor with the broader picture.
+## 9. Out of scope
 
-**The unit's own timer is a failsafe**, with a **much longer** threshold, for when control is
-unreachable. That is not hypothetical: control was down for days at the start of October 2026,
-during which the units kept observing. If the two thresholds were comparable they would race
-and double-shutdown; a far longer unit threshold means it acts only once control has clearly
-stopped managing it.
+- **Endpoint admission** (mast-claude-config#36), which will reuse `why_busy` but decides its
+  own exclusions separately.
+- **Per-component idleness.**
+- **Unguided science** (§5's premise).
 
-**Arm it observe-only first.** Log the decision it *would* have made for several nights before
-it can power anything down — the same pilot-then-commit shape the mount-stability campaign
-used. An auto-shutdown that fires with no recorded reason is the same class of mistake as
-MAST_unit#281, where a 100 % campaign failure rate looked perfectly healthy.
+## 10. Work items
 
-## 8. Deliberately out of scope
+1. **MAST_common** — `UnitConfig.minutes_to_autoshutdown_on_idle` with its validator and GUI
+   metadata; the three `FullUnitStatus` fields, with the `None` semantics in their docstring.
+2. **MAST_unit**, same branch name — `why_busy` / `is_busy` / `is_idle`; `_guiding_live`; the
+   marks and the auto-shutdown in `ontimer`; the clock reset at `startup`; `status()` wiring.
+   Both merge together.
 
-- **The shutdown decision itself**, on either side. This plan delivers the measurement.
-- **The failsafe threshold** — a number, and whether it is per-unit config.
-- **Per-component idleness.** If it is ever wanted, the marks move to `Component` and the
-  fields to `ComponentStatus`; nothing here forecloses that.
-- **Unguided science.** Premised absent (§4). Its arrival reopens the interlock question.
+## 11. Verification
 
-## 9. Verification
-
-- `ontimer` stamps `active_since` and clears `idle_since` when the predicate flips to busy, and
-  the reverse — exercised with a fake clock rather than by waiting.
-- **Overlapping activities**: `Acquiring` then `Solving`, ending `Acquiring` first, must leave
-  the unit active with `active_since` unchanged; only the last end makes it idle. This is the
-  normal acquisition shape, not an edge case.
-- **A component activity alone** — mount slewing with no unit flag — makes the unit non-idle
-  and appears in `why_not_idle`. This is the case the rejected overrides got wrong, so it is
-  the test that pins the choice of mechanism.
-- **Guiding via the interface**: a backend reporting `is_guiding` true with no
-  `UnitActivities.Guiding` flag set must still read as busy.
-- `was_shut_down` makes the unit not idle-eligible, so an inactivity shutdown cannot re-fire.
-- `idle_seconds` and `why_not_idle` never disagree: whenever the dict is non-empty,
-  `idle_seconds` is `None`.
-- A sick component does not break the union, and does not silently read as idle — it shows in
-  `operational` / `why_not_operational`.
-
-## 10. Sequencing
-
-1. **MAST_common** — the three fields on `FullUnitStatus`, with the `None`-means-unknown
-   semantics in their docstring. Three lines plus a comment. Merge first: the unit's CI
-   resolves MAST_common by matching branch name, else `master`, so a same-named branch keeps
-   the unit green at every step.
-2. **MAST_unit** — the two marks on `Unit`, the `ontimer` evaluation, `why_not_idle`, the
-   `status()` wiring and the tests. Branch `feat/active-idle-since`.
-3. Separately, later: the control-side decision, and the unit failsafe behind observe-only
-   logging.
+- `why_busy`: a component activity alone is busy; `ImagerActivities.CoolingDown` alone is
+  idle; PHD2 guiding with the unit's flag down is busy (via the cache).
+- The clock: busy→idle and idle→busy stamp the marks (fake clock); overlapping activities stay
+  active until the last ends; nothing runs outside `RUNNING`; `startup` restarts it.
+- Auto-shutdown: fires at the configured minutes and not before; logs once; does not fire at 0;
+  does not fire twice; a config change applies on the next tick.
+- Config: 0 and 5 load; 1–4 are refused.
+- Status: `idle_seconds` is `None` while busy; all three `None` outside `RUNNING`.
+- On mast00: with a value of 5, a started unit left alone shuts down after 5 minutes.

@@ -73,7 +73,7 @@ that must always work can stay on a known-good revision while common moves.
 | `config/supervisor.py` — the schema sits beside `UnitConfig`/`SpecsConfig` | the service, the session bridge, the supervisor and everything below |
 | `const.py` — ports, `SUPERVISOR_PORT`, `BASE_SUPERVISOR_PATH`, `MINIMUM_PWI4_VERSION` | its own `pyproject.toml`, CI, README, `docs/decisions/` |
 | `process.py` — `find_processes(session_id=)`, `process_session_id()` | the installer |
-| `opmode.py`, `init_log(file_leaf=)`, and later a `SupervisorApi` client | |
+| `opmode.py`, `LogProgram` / `init_log(program=)`, and later a `SupervisorApi` client | |
 
 `state.py` stays in MAST_supervision until a second program (a MAST_gui fleet view) actually
 imports the snapshot model; promote it to common then.
@@ -135,7 +135,7 @@ that a session-0 service is a **competing** path into the processes — a sessio
 by a hand-run unit that can neither draw with it nor see `Z:` — and that `mast-unit` commanded
 hardware on process start with no interlock. `mast-service` answers both by construction: it
 spawns nothing but the supervisor, and the supervisor and everything it starts run in the
-interactive session (§4); and under `automatic` it launches VSCode, never the app (§8). So the
+interactive session (§4); and under `development` it launches VSCode, never the app (§8). So the
 supersession is a change of reason, not a reversal of intent — but it is provisioning's decision
 to record, beside the test and the finalize assertion it relaxes for `mast-service` alone.
 `mast-service` is not among `Get-MastServiceNames`' four names, so the stand-down would not remove
@@ -244,8 +244,17 @@ module logger) prove the path has never run.
 Killing a PWI4 holding a connected, tracking mount because a supervisor restarted is
 destructive — and adoption is what makes the staged rollout in §11 safe. `find_process` has no
 owner/session filter, so add `find_processes(..., session_id=)` and `process_session_id()` to
-`common/process.py`; adopt only same-session matches, and kill a different-session orphan
-**once**, at startup.
+`common/process.py`. Adopt a match in the supervisor's own login session, oldest first, the
+others reported. **A match in another login session is never killed** -- *decided 2026-10-08*,
+replacing this section's first rule of killing a different-session orphan once at startup. That
+rule dated from the NSSM services that ran PWI4 and PHD2 in session 0, which MAST_provisioning#159
+removed; it would also kill a usable copy started in an operator's Remote Desktop session, and
+as `mast` it could not kill a LocalSystem process anyway. Instead the row is **`blocked`**, at
+ERROR: not adopted, not killed, and no second copy spawned beside it, rechecked every probe
+interval until that copy exits; a respawn after the backoff looks first, for the same reason. A
+process whose session cannot be read counts as another session's, and a same-session copy the
+supervisor cannot stop (an elevated one) is `blocked` too. Spawned programs run with the executable's folder as their working directory
+(MAST_unit#21); a location registry left by provisioning is the expected long-term source.
 
 Spawn with an argv **list** and `shell=False` — `process.py`'s `cmd.split()` is broken for
 `C:\Program Files (x86)\…`, which is the whole reason the current code passes `shell=True` and
@@ -266,13 +275,18 @@ assertions above are `covers.pwi4_is_viable()` re-expressed without the client; 
 Likewise do not import `unit.phd2` — a 30-line one-shot JSON-RPC in `probes.py`, socket closed
 each time.
 
+**A spawn gets a startup grace** -- *decided 2026-10-08*: failed probes do not count until the
+first healthy probe or 120 s, and the row is `starting` (WARNING) meanwhile, so a slow cold
+start is not a restart loop. An adopted program gets none. Probes never overlap: a program's next
+probe waits for its last, since the app probe may run 70 s on a 15 s interval.
+
 Failure handling: `unhealthy_threshold` (3) consecutive failures → terminate, grace, kill,
 respawn; `_Backoff(5.0, cap 120.0)` between restarts; more than 5 restarts in 600 s →
 `CRASH_LOOPED`, stop, red on the GUI, one ERROR naming the last exit code, and a "retry now"
 button. A PWI4 that exits immediately because the mount is unplugged must not be restarted
 eight thousand times a night.
 
-**`not_supervised` is a distinct state, not a flavour of unhealthy.** VSCode under `automatic`
+**`not_supervised` is a distinct state, not a flavour of unhealthy.** VSCode under `development`
 (§8) is launched once and never restarted, so "not running" is its normal resting condition.
 If that serialises as unhealthy, every developer machine reds out permanently on any fleet view
 built over `/status` — and a status surface that is always red is one nobody reads. The state
@@ -345,7 +359,7 @@ folder.
 
 ```
 In maintenance:  false
-Opmode:          controlled
+Opmode:          production
 ```
 
 plus hostname · role · phase · uptime · `opstate` · config generation, with `Config().degraded_reason`
@@ -385,7 +399,7 @@ snapshot, never from live state.
 
 ```
 Actions ─ Maintenance mode ─ activate / deactivate
-        └ Opmode           ─ automatic / controlled
+        └ Opmode           ─ development / production
 ```
 
 Each item opens a **confirmation modal naming the exact effect**, in the operator's terms, before
@@ -396,8 +410,8 @@ anything is written:
 > controller will stop allocating plans to this unit. **Nothing on this machine stops** — PWI4,
 > PHD2 and the unit app keep running. The supervisor will then restart (about 10 seconds).
 
-> *Change opmode to `automatic`?*
-> mast07's `opmode` becomes `automatic` in the configuration database. The supervisor will
+> *Change opmode to `development`?*
+> mast07's `opmode` becomes `development` in the configuration database. The supervisor will
 > restart and open VSCode on `mast-unit.code-workspace` instead of running the unit app. **The
 > running unit app will be stopped.**
 
@@ -441,7 +455,7 @@ Apply `Site.normalize_unit_specifier` ([config/site.py:79](../../common/config/s
 the name before writing, so the entry matches what `common/parsers.py:95` compares against.
 
 **Opmode writes through `set_unit`**, which persists only the delta from `units.common`
-(`config/__init__.py:814-827`) — so setting a unit to `controlled` is exactly a one-key delta.
+(`config/__init__.py:814-827`) — so setting a unit to `production` is exactly a one-key delta.
 Note the corollary: setting a unit *back* to the value `units.common` already holds writes
 nothing and the unit inherits it again, which is correct but means the DB will not always show
 an explicit per-unit value. The label reads the effective value from `resolve_opmode()`, so it
@@ -475,7 +489,7 @@ exactly this and app.py already uses it for its startup banner.
 
 ```
 supervisor heartbeat  up 4:12:06  phase=RUNNING
-  role=unit  opmode=controlled  opstate=running  maintenance=false  config gen=418
+  role=unit  opmode=production  opstate=running  maintenance=false  config gen=418
   resources  network=ok  ramdisk=ok (47 indexes)  share=ok
   processes  pwi4=healthy pid=5120 r=0    phd2=healthy pid=7332 r=1
              ps3cli=healthy pid=8044 r=0  app=healthy pid=9160 r=0
@@ -527,11 +541,24 @@ only once the machine is healthy answers a question nobody is asking; the valuab
 `phase=WAITING_FOR_RESOURCES network=down share=down`, which is precisely the window in which a
 DB-derived port would not exist.
 
-**It must not be able to kill the supervisor.** The Tk mainloop owns the main thread, so uvicorn
-runs in a worker with `install_signal_handlers=False` — without it, `Server.run()` raises off the
-main thread. A bind failure (port taken, another supervisor mid-restart) degrades to no-API with
-one WARNING, under the same rule as the window: **the supervisor must never die because a surface
-could not open.**
+**The port is the one-supervisor lock.** The likeliest reason 8004 is taken is an earlier
+supervisor still running, mid-shutdown or wedged, and a supervisor with no API beside one that
+answers is worse than one that failed to start: two loops adopting the same programs, with the
+one nobody can see in charge. So the window's rule (*never die because the window could not
+open*) does not extend to the API. The port is claimed before the loop starts, on a socket the
+supervisor binds itself and hands to uvicorn, which runs in a worker thread (uvicorn installs no
+signal handlers off the main thread). When the port is taken, the holder is asked for `/status`:
+
+- a **live** supervisor, whose snapshot is fresh in any phase: the new one logs an ERROR and
+  exits. A degraded peer is reporting a problem its replacement would meet too.
+- a **`STOPPING`** supervisor: waited for, bounded, then taken over as stuck.
+- **anything else** (no answer, a stale snapshot, not a snapshot): if the listener runs
+  `-m supervision` it is killed and the port taken over, its programs adopted as on any start.
+  A listener that is not a supervisor, or one that cannot be found or killed, aborts the new one.
+
+A predecessor in another login session is killed like one in this session: §6's never-kill rule
+covers the programs a supervisor runs, not another supervisor. The snapshot carries its heartbeat
+interval so "fresh" is judged against the interval in force, not the default.
 
 **Read-only, and the binding enforces it.** §13's boundary — *the supervisor is a console at the
 telescope, not a remote-control surface* — survives a read-only endpoint intact. But `/status` is
@@ -573,11 +600,16 @@ invert the opmode plan's precedence.
 
 **`opmode` — one field, two readers** (*decided*):
 
-- **`controlled`** → the supervisor launches the app, which comes up in standby awaiting the
+- **`production`** → the supervisor launches the app, which comes up in standby awaiting the
   control machine. Restart on process exit or on the status endpoint not answering — **never**
   because `operational` is false; that is health, and the opmode plan puts health in
   `operational`/`why_not_operational`.
-- **`automatic`** → the supervisor launches **VSCode** on `<top>/mast-<role>.code-workspace`
+*(The opmodes were `automatic` / `controlled` until 2026-10-06, then `operated` / `controlled`
+until 2026-10-12 — see opmode-design §2. `development`: an engineer runs the app from VSCode,
+and it starts the machine immediately. `production`: the control machine's supervisor runs the
+app, and it waits for `startup`.)*
+
+- **`development`** → the supervisor launches **VSCode** on `<top>/mast-<role>.code-workspace`
   (which already exists on this machine) **once, at startup, and never again** — *decided*.
   Restarting the editor is the user's prerogative, not the supervisor's. Launch-once is still
   right, because it is what makes a reboot land the developer at their workspace with no
@@ -672,8 +704,9 @@ no hardware): `test_supervisor_resources.py` (all up → ready; one down → wai
 after the budget, **and it proceeds**; a raising probe is "down" and never propagates;
 transitions log once, not per poll), `test_supervisor_index_check.py` (`tmp_path` with 47 files;
 one missing; one zero-length), `test_supervisor_managed_process.py` (**the critical one**: a
-same-session match → zero spawns *and zero kills*; another-session match → killed once then
-spawn; threshold → exactly one restart; backoff caps; crash-loop stops),
+same-session match → zero spawns *and zero kills*; another-session match → zero kills, zero
+spawns, `blocked`, then a spawn once it exits; a spawn's failures inside the grace → `starting`,
+no restart; threshold → exactly one restart; backoff caps; crash-loop stops),
 `test_supervisor_probes.py` (a `TCPServer`/`http.server` on an ephemeral port — not an external
 process, so the conftest guard does not fire; PWI4 **unhealthy on a 200 that is not PWI4**),
 `test_supervisor_logsink.py` (bounded; formats in `emit`; `assert not
@@ -696,14 +729,18 @@ process; and a phase change emits one immediately rather than waiting for the in
 delta; and each returns the restart request rather than calling `sys.exit` itself, so the
 decision is testable apart from the exit.
 
-`test_supervisor_status_api.py` drives the app with FastAPI's `TestClient` — no uvicorn, no
-socket, so it runs on Linux CI: `/status` answers from a `STARTING` snapshot **before any
+`test_supervisor_status_api.py` runs the app on uvicorn on an ephemeral loopback port, which
+runs on Linux CI (`TestClient` would need httpx, which the repo does not declare): `/status` answers from a `STARTING` snapshot **before any
 resource is ready and before `Config()` has loaded**, which is the endpoint's reason to exist and
 therefore the assertion that matters most; the body is a `CanonicalResponse` with the snapshot
 under `value`; a `not_supervised` process does not make the overall report a fault; and the path
 is built from `BASE_SUPERVISOR_PATH` rather than a literal. Separately, assert
 `SUPERVISOR_PORT` is a plain constant and that nothing in the supervisor package calls
 `get_service()` to find it — that is the one invariant a later tidy-up would break silently.
+`test_supervisor_instance.py` covers the port claim against real sockets and a fake owner
+lookup: a live peer in any phase aborts and is not killed; a stale or silent supervisor is
+killed and the port taken; a `STOPPING` one is waited for, then killed once the wait runs out;
+a holder that is not a supervisor, or cannot be killed, aborts.
 
 Add `win32process.CreateProcess`/`CreateProcessAsUser` to the denied set in the common and unit
 conftests — the guard has a second door now — and give MAST_supervision's own conftest the same
@@ -757,9 +794,9 @@ restarted PHD2 leaves the unit silently claiming a healthy guider.
 **Changed elsewhere — by the GUI, by the control machine, by hand in Mongo — the supervisor
 reports and does not act.** It registers a `Config` change callback on `units`, and when the
 effective `opmode` no longer matches the one it launched under, the header label shows both
-(`Opmode: controlled (DB now says automatic)`) and the Actions menu gains an **Apply** item that
+(`Opmode: production (DB now says development)`) and the Actions menu gains an **Apply** item that
 performs the same restart. The reasoning is the one the menu's confirmation modal makes
-explicit: switching `controlled`→`automatic` stops a running unit app, possibly mid-exposure.
+explicit: switching `production`→`development` stops a running unit app, possibly mid-exposure.
 That is a physical event, and a physical event should not be the silent consequence of someone
 saving a form in a browser. An operator — or the same person, a second later, clicking Apply —
 decides when.
@@ -785,7 +822,7 @@ telescope, not a remote-control surface.
 | stage | repo | contents |
 |---|---|---|
 | 0 | common | `common/opmode.py` (the merged opmode plan, stage 1) — prerequisite |
-| 1 | common | `config/supervisor.py`; `const.py` ports + `MINIMUM_PWI4_VERSION` + `SUPERVISOR_PORT` (8004, after the cross-repo grep) + `BASE_SUPERVISOR_PATH`; `find_processes`/`process_session_id`; `init_log` gains `file_leaf`; **a `sites` write path** (`$addToSet`/`$pull` on `units_in_maintenance`) beside `write_unit_delta` |
+| 1 | common | `config/supervisor.py`; `const.py` ports + `MINIMUM_PWI4_VERSION` + `SUPERVISOR_PORT` (8004, after the cross-repo grep) + `BASE_SUPERVISOR_PATH`; `find_processes`/`process_session_id`; `init_log` gains `program=LogProgram`; **a `sites` write path** (`$addToSet`/`$pull` on `units_in_maintenance`) beside `write_unit_delta` |
 | 1a | supervision | the seed: `pyproject.toml`, `uv.lock`, `ruff.toml`, CI (Linux + Windows, paired MAST_common branch), README, `docs/decisions/` records (MAST_provisioning's format), CLAUDE.md, the package-location test |
 | 1b | prov. | `mast-repos.tsv` row (`supervision`, `MAST_supervision`, `unit,spec`, `main`); `mast-clone` accepts `pyproject.toml` — `-r <dir>/pyproject.toml --group <dir>/pyproject.toml:dev` — where a repo has no `requirements.txt` |
 | 2 | supervision | `state.py`, resources, probes, managed, launcher, locate, logsink, gui_model + every test. `--dry-run` prints the resolved plan and exits |
@@ -796,20 +833,25 @@ telescope, not a remote-control surface.
 | 7 | spec | mirror stage 6 |
 | 8 | common | delete `WatchedProcess`, `log_stream`, `kill_process_by_name`, and (after a cross-repo grep) `ensure_process_is_running` |
 
-**What can ship before any MAST_unit change: stages 0–5, under `automatic` only.** That is a
+**What can ship before any MAST_unit change: stages 0–5, under `development` only.** That is a
 deployable result, not just a shadow run — reboot → autologon → `mast-service` → supervisor →
 resources → PWI4 and ps3cli → VSCode, and the operator presses F5 as today. Two constraints
 hold until MAST_unit catches up:
 
-- **The launcher refuses `controlled`**, loudly, until MAST_unit's opmode stage 3 lands. Before
-  it, the app runs `startup()` unconditionally, so a supervisor-launched app would move hardware
-  on boot. A refusal, not a silent fallback to `automatic`: a unit configured `controlled` that
-  quietly behaves otherwise is the failure the opmode plan's `ValueError` exists to prevent.
+- **The launcher refuses `production` for any role whose app does not yet act on `opmode`**,
+  loudly. Such an app runs `startup()` unconditionally, so a supervisor-launched one would move
+  hardware on boot. A refusal, not a silent fallback to `development`: a machine configured
+  `production` that quietly behaves otherwise is the failure the opmode plan's `ValueError`
+  exists to prevent. **Unit is allowed** since MAST_unit#297 (the unit side of opmode stage 3:
+  under `production`, `start_lifespan` waits for `startup`); **spec stays refused** until MAST_spec
+  mirrors it (opmode-design §8 stage 6).
 - **PHD2 is observe-only** (§6) until stage 6.
 
-`init_log` gaining `file_leaf` in stage 1 is the fix for the log collision: without it the
-supervisor would write `mast-unit-log.txt`, the same file the app appends to, from a second
-process over SMB, with no PID in the format to tell them apart.
+`init_log` gaining `program=LogProgram.SUPERVISOR` is the fix for the log collision: without it
+the supervisor would write `mast-unit-log.txt`, the same file the app appends to, from a second
+process over SMB, with no PID in the format to tell them apart. The caller names its program
+and never the file, so the name stays derived from config.toml's `machine_role`:
+`mast-<role>-supervisor-log.txt` (MAST_common#148).
 
 **Port 8004 needs no firewall rule on provisioned units** — verified 2026-09-24: `bootstrap.ps1`'s
 `firewall-off` element disables Windows Firewall on all three profiles, the units sitting behind
@@ -837,7 +879,7 @@ prerequisite resources and the supervised processes; its four constraints — a 
 rather than a `services` row, binding in `STARTING`, never killing the supervisor, and
 read-on-`0.0.0.0`/write-on-`127.0.0.1` — all follow from the endpoint's purpose being to describe
 a machine that cannot reach the config DB. That in turn promoted the snapshot out of `gui_model.py`
-into `state.py`, now rendered by three surfaces rather than two. **VSCode under `automatic` is
+into `state.py`, now rendered by three surfaces rather than two. **VSCode under `development` is
 launched once and never restarted** (§8), the user's prerogative, which required `not_supervised`
 as a state distinct from unhealthy (§6) so that a closed editor is not a fleet-wide fault.
 `SUPERVISOR_PORT = 8004` was verified free against the live `services` collection (`unit` 8000,
@@ -872,8 +914,8 @@ rounds could not answer are now answered: provisioned units already have autolog
 Firewall is off fleet-wide, so 8004 needs no rule (§15); and no MAST service exists at all since
 MAST_provisioning#159, so there is no `mast-unit` to replace — but that same decision forbids
 registering `mast-service`, and needs superseding in provisioning (§3). §15 now marks what can
-ship before any MAST_unit change (stages 0–5, `automatic` only), with the launcher refusing
-`controlled` and PHD2 observed rather than supervised until MAST_unit catches up (§6).
+ship before any MAST_unit change (stages 0–5, `development` only), with the launcher refusing
+`production` and PHD2 observed rather than supervised until MAST_unit catches up (§6).
 
 **Correction to the previous round:** the decision record called dangling above **exists** — in
 MAST_provisioning, not in mast-claude-config:
@@ -896,3 +938,29 @@ whether supervision runs independently of the window (§7 answers: workers first
 fail), and the maintenance flag carrying no who / when / why — are either answered here or
 remain open there. Once this plan lands, the 08-12 record should be marked superseded in
 MAST_provisioning, pointing here.
+
+**Revised 2026-10-08**, during stage 2 part 4 (MAST_supervision `managed.py`), two decisions by
+Eli. A copy of a supervised program in another Windows login session is **blocked, not killed**
+(§6): the kill-once rule answered session-0 copies left by NSSM services that no longer exist,
+and would have killed a usable Remote Desktop copy. And a **startup grace** of 120 s keeps a
+slow cold start from counting toward the restart threshold (§6). Two process states follow,
+`starting` and `blocked`, alongside a per-row `since`.
+
+**Revised 2026-10-11**, during stage 2 part 5 (MAST_supervision `launcher.py`), one decision by
+Eli. The launcher's `production` refusal is **per role** (§15): MAST_unit#297 made the unit app
+wait for `startup` under `production`, so unit is allowed; MAST_spec reads no `opmode` yet, so
+spec stays refused. The unit change has not yet run on sky; nothing installs before stage 5.
+
+**Revised 2026-10-11**, for MAST_common#148, one decision by Eli. The supervisor's log file is
+**named by program, not by the caller** (§15): `init_log` takes `program=LogProgram.SUPERVISOR`
+rather than a `file_leaf`, so the role stays from config.toml and the file is
+`mast-<role>-supervisor-log.txt`. The `mast-supervisor-log.txt` named in the first round above
+would have dropped the role, and a free-form leaf would have let callers state the machine's
+identity again.
+
+**Revised 2026-10-11**, for stage 3 part 2 (MAST_supervision `api.py`, `instance.py`), one team
+decision. **The status port is the one-supervisor lock** (§7), replacing the round of 2026-09-22's
+"never killing the supervisor" constraint for the API: a bind failure degraded to no API, which
+would leave a supervisor nobody can see running beside a stale one that answers. A live holder
+now aborts the new supervisor, a `STOPPING` one is waited for, and a dead or wedged supervisor is
+killed and taken over, in any login session. The window keeps the never-die rule.
