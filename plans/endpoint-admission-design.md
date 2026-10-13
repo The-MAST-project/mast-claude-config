@@ -32,7 +32,7 @@ Today only goal 1's shutdown half exists: `refuse_while_shutting_down`
 `UnitActivities.ShuttingDown` is up. Two concrete gaps that motivated this plan:
 
 - A `startup` arriving mid-shutdown is admitted: `startup()` checks `StartingUp`, not
-  `ShuttingDown`, so it sets `opstate = RUNNING` and starts its thread while the shutdown is
+  `ShuttingDown`, so it starts its thread while the shutdown is
   still dispatching.
 - Two operations arriving within milliseconds are both admitted, since each handler raises its
   flag only after any check could have run (§5).
@@ -47,9 +47,14 @@ row decides.
 | 1 | `ShuttingDown` active | READ |
 | 2 | `StartingUp` active | READ, SHUTDOWN |
 | 3 | `opstate == INITIALIZED` | READ, STARTUP, SHUTDOWN, POWERDOWN |
-| 4 | `opstate == SHUTDOWN` | READ, STARTUP, SHUTDOWN, POWERDOWN |
+| 4 | `opstate == SHUT_DOWN` | READ, STARTUP, SHUTDOWN, POWERDOWN |
 | 5 | busy (§3) | READ, ABORT, SHUTDOWN |
-| 6 | otherwise (`RUNNING`, idle) | everything |
+| 6 | otherwise (`STARTED_UP`, idle) | everything |
+
+The opstate is the lifecycle state **reached**, set when a startup or shutdown completes
+(opmode-design §4, revised 2026-10-13), so mid-transition it still names the previous state:
+`INITIALIZED` or `SHUT_DOWN` while starting up, `STARTED_UP` while shutting down. Rows 1 and 2
+come first for that reason; the transition is the activity, not the opstate.
 
 Why each departure from the shortest form of the goals:
 
@@ -250,7 +255,7 @@ config document holds.
 
 **Not gated: the idle auto-shutdown.** It calls `shutdown()` directly from `ontimer`, not over
 HTTP, so the gate never sees it. Fine: a shutdown is admitted while busy anyway, and it only
-fires when idle and `RUNNING`.
+fires when idle and `STARTED_UP`.
 
 ## 9. Audits before enforcing
 
@@ -319,7 +324,7 @@ Done: the prerequisites (§8: MAST_unit#309), and the busy predicate with its st
 3. **No ABORT during `StartingUp`** — row 2 stays READ and SHUTDOWN. An abort would interrupt the
    mount's find-home: `Mount.abort()` ends `FindingHome` and sends PWI4 `/mount/stop`, and nothing
    then records that the mount is unhomed — PWI4 reports no homed state, and `Mount.operational`
-   does not consider it. The unit would be `RUNNING` and operational with an uncalibrated mount,
+   does not consider it. The unit would be `STARTED_UP` and operational with an uncalibrated mount,
    silently. A shutdown during startup interrupts the homing too, but then disconnects, and the
    next `startup()` homes again, so it cannot leave an unhomed mount looking operational.
    *Separately (not this plan):* the mount should know whether it has homed since it connected —
@@ -344,7 +349,7 @@ Done: the prerequisites (§8: MAST_unit#309), and the busy predicate with its st
 
 - `admit()` against every row of §2, with the claim held and not held, in both opmodes and both
   scopes — a table-driven test, no FastAPI.
-- First match wins: `ShuttingDown` with `opstate == RUNNING` and busy → row 1 (READ only).
+- First match wins: `ShuttingDown` with `opstate == STARTED_UP` and busy → row 1 (READ only).
 - `why_busy`: a component activity alone (mount `Slewing`, no unit flag) is busy; PHD2 guiding
   with `UnitActivities.Guiding` down is busy via the cache; a shut-down idle unit has
   `why_busy == {}` and `is_idle`.
