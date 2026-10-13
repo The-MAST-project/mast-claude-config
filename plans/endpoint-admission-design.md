@@ -7,14 +7,15 @@
 > admission lock closes the check-then-run race between two requests. Replaces
 > `refuse_while_shutting_down` in MAST_unit `app.py`.
 >
-> **Status: plan only — not implemented. Design agreed 2026-10-12; all design questions closed
-> (§12).**
-> Code baseline: MAST_common `master` @ `14890ae`, MAST_unit `main` @ `f76987b`, plus MAST_unit
-> branch `unit-startingup-gaps` @ `9a4f420` (the StartingUp / ShuttingDown dispatch flags this
-> plan relies on, §8). Builds the busy predicate of
-> [unit_idleness_design.md](unit_idleness_design.md) first, with three revisions recorded there.
-> Mode names: **production** / **development**, renamed from `controlled` / `operated` on
-> 2026-10-12 (MAST_common#153, MAST_unit#307, mast-claude-config#37; §7).
+> **Status: plan only — the gate is not implemented. Revised 2026-10-13; one question reopened
+> (§12.5).** Code baseline: MAST_common `master` @ `847c870`, MAST_unit `main` @ `7f5d27f`.
+>
+> **What changed since 2026-10-12.** The busy predicate (`why_busy`, `is_busy`, `is_idle`, the
+> guiding cache) now exists in MAST_unit (#321), built for the idle auto-shutdown
+> ([unit_idleness_design.md](unit_idleness_design.md)) — so §3 describes code, not a plan. It
+> excludes `ImagerActivities.CoolingDown` (an idleness decision), which reopens whether the gate
+> treats a cooling camera as busy (§12.5). The prerequisites in §8 are merged. Mode names are
+> **production** / **development** (MAST_common#153).
 
 ## 1. Goals
 
@@ -75,70 +76,41 @@ Why each departure from the shortest form of the goals:
 A request **already running** when the state changes is not interrupted, as today. The gate
 decides admission only.
 
-## 3. Busy: `why_busy`, `is_busy`, `is_idle`
-
-### 3.1 Definition
+## 3. Busy: `why_busy`, `is_busy`, `is_idle` (implemented, MAST_unit#321)
 
 ```python
 Unit.why_busy -> dict[str, list[str]]   # {"unit": ["Guiding"], "covers": ["Closing"]}; {} when idle
 Unit.is_busy  -> bool                   # bool(why_busy)
-Unit.is_idle  -> bool                   # not is_busy
+Unit.is_idle() -> bool                  # not is_busy; overrides Activities.is_idle
 ```
 
-`why_busy` holds an entry for each owner with something active, valued from that owner's
-`activities_verbal`:
+Built for the idle auto-shutdown, and the gate reuses it. What it counts, per
+unit_idleness_design.md §3–§5:
 
-- **`"unit"`**: `UnitActivities`. Every one of them is unit-level work (the list is in
-  unit_idleness §2).
-- **each component**: `"mount"`, `"covers"`, `"focuser"`, `"stage"`, `"imager"` (wrapper *and*
-  backend — the imager splits its flags between them, so both are read and merged). A direct
-  `PUT /mount/goto_ra_dec_j2000` or covers move raises **no** unit flag, so without this term a
-  development night reads as idle throughout.
-- **guiding**: `guider.is_guiding`, under `"unit"` as `"Guiding"`, so a PHD2 that is guiding
-  with the unit's flag down still reads busy (unit_idleness §4: the dangerous divergence).
+- **`"unit"`** — `UnitActivities`;
+- **each component** — mount, covers, focuser, stage, imager (wrapper and backend merged). A
+  direct component command raises no unit flag, so without this a development session reads
+  idle throughout;
+- **guiding** — `UnitActivities.Guiding` **or** `_guiding_live`, a cache of
+  `guider.is_guiding` refreshed by `ontimer` each tick (PHD2's answer is a socket round trip,
+  which the gate — on the event loop, under a lock — must never make). Either true is busy, so a
+  divergence fails safe.
 
-Keyed by owner, not flattened: flag names collide across enums (`StartingUp` in 10,
-`ShuttingDown` in 10, `Exposing` in 8, `Aborting` in 8), and a structural key resolves that by
-construction. Never union the `activities` integers — the enums overlap in bit values.
+Not counted: **tracking** (a state, not an activity) and **`ImagerActivities.CoolingDown`** (see
+§12.5 for what that means here).
+
+Keyed by owner: flag names repeat across enums and their bits overlap, so the integers are never
+unioned. **Computed on demand** from in-memory flags — the gate cannot use a 2 s stale answer,
+because an operation raises its flag immediately. `FullUnitStatus.why_busy` publishes it, `None`
+meaning unknown (MAST_common#159).
 
 **Guiding counts as busy, for hours.** During an observation only READ, ABORT and SHUTDOWN are
-admitted. This is intended: guiding is the science interlock, coextensive with the
-spectrograph's exposure (unit_idleness §4). Tracking does not count: it is a state with no
-start or end, and residue when nothing claims the unit (unit_idleness §3).
+admitted. Intended: guiding is the science interlock.
 
-`was_shut_down` is **not** a term. `is_idle` is exactly `not is_busy`, so including it would
-make every shut-down unit read busy. The shut-down case is the table's row 4, by `opstate`;
-inactivity-shutdown eligibility is `is_idle and not was_shut_down`, stated where it is used.
+`was_shut_down` is not a term; the shut-down case is the table's row 4, by `opstate`.
 
-`Unit.is_idle` overrides the inherited `Activities.is_idle`, which reads the unit's own flags
-only. Its one caller ([unit.py:1597](../../unit/src/unit.py#L1597)) gets the stricter, correct
-answer. The private `_unit_is_busy()` on the unmerged `mount-stability-campaign` branch, a
-hand-picked flag list, is replaced by `unit.is_busy`.
-
-### 3.2 Computed on demand; guiding cached
-
-`why_busy` is computed at each call, not once per `ontimer` tick as unit_idleness §5 had it. The
-gate cannot use a 2 s stale answer: an operation raises its flag immediately, and a cached dict
-would not show it until the next tick, which reopens exactly the race §5 closes.
-
-On demand is cheap: `is_active` / `activities_verbal` read in-memory flags under each owner's
-`Activities.lock`, with no hardware access. Unit_idleness' concern about a sick component
-taking the whole status down applies to `status()`, which talks to hardware; this does not.
-
-The one exception is guiding. `PHD2Connector.is_guiding`
-([phd2.py:1399](../../unit/src/phd2/phd2.py#L1399)) calls `get_status()`, a socket round-trip
-to another process, which the gate — running on the event loop, under a lock — must never
-make. So `Unit.ontimer` refreshes a cached `_guiding_live` from `guider.is_guiding` each tick,
-and `why_busy` reads `UnitActivities.Guiding` **or** `_guiding_live`. Either one true reads
-busy, so the divergence fails safe; the cache is at most 2 s stale, and only in the
-"PHD2 guiding without our flag" direction, which nothing starts in under 2 s.
-
-### 3.3 Published
-
-`FullUnitStatus.why_busy: dict[str, list[str]] | None = None`, with unit_idleness §6's
-semantics unchanged: `None` unknown (an old unit, or control's fabricated `BasicUnitStatus`),
-`{}` idle, non-empty busy. Must not default to `{}` — a new controller reading an old unit would
-see "idle".
+**Already in use:** `execute_assignment` refuses while `not is_idle()`, so since #321 it also
+refuses while a component is busy, naming what.
 
 ## 4. Classifying routes
 
@@ -265,19 +237,20 @@ controller, gated; development: an engineer driving components. They replaced `c
 with a WARNING, so the gate sees `OpMode.PRODUCTION` / `OpMode.DEVELOPMENT` whichever spelling a
 config document holds.
 
-## 8. Dependencies already in place
+## 8. Dependencies already in place (merged)
 
-From MAST_unit `unit-startingup-gaps` (`9a4f420`), not yet merged:
+- **MAST_unit#309** — `StartingUp` and `ShuttingDown` end only after dispatch
+  (`_startup_dispatching`, `_shutdown_dispatching`); before, `StartingUp` cleared 1.9 s into a
+  34 s startup and row 2 would have opened the gate with the covers still opening.
+  `do_shutdown` waits for an in-flight startup to finish dispatching (row 2's safety argument),
+  and connects only what is disconnected, on its own thread, so a repeat `shutdown` cannot
+  reconnect what a running one is disconnecting. `FindingHome` ends when the axes stop.
+- **MAST_unit#321** — `why_busy` (§3).
+- **MAST_unit#308, #310, #320** — PHD2 reports a lost connection; the imager's `CoolingDown`.
 
-- `StartingUp` and `ShuttingDown` are ended by `ontimer` only after their dispatch has finished
-  (`_startup_dispatching`, `_shutdown_dispatching`). Before that, `StartingUp` cleared 1.9 s
-  into a 34 s startup (mast00, 2026-10-11), and row 2 would have opened the gate with the covers
-  still opening.
-- `do_shutdown` waits for an in-flight startup to finish dispatching (row 2's safety argument).
-- `do_shutdown` connects on its own thread, not the request's, so a repeat `shutdown` admitted by
-  rows 3–5 no longer reconnects what a running shutdown is disconnecting.
-
-That branch merges first.
+**Not gated: the idle auto-shutdown.** It calls `shutdown()` directly from `ontimer`, not over
+HTTP, so the gate never sees it. Fine: a shutdown is admitted while busy anyway, and it only
+fires when idle and `RUNNING`.
 
 ## 9. Audits before enforcing
 
@@ -319,25 +292,25 @@ here, so its route list is not in this plan.
 
 ## 11. Work items, in dependency order
 
-1. **MAST_unit** — merge `unit-startingup-gaps` (§8).
+Done: the prerequisites (§8: MAST_unit#309), and the busy predicate with its status field
+(§3: MAST_unit#321, MAST_common#159).
+
+1. **Decide §12.5** — whether a cooling camera makes the unit busy for admission.
 2. **MAST_common** — `Admission` enum; `admission` on `EndpointDeclaration` / `@endpoint`
-   (default `OPERATION`); `admit()` with its table tests; `FullUnitStatus.why_busy` (§3.3).
-   Same-named branch, so the unit's CI resolves it.
-3. **MAST_unit** — `why_busy` / `is_busy` / `is_idle`, the `_guiding_live` cache in `ontimer`,
-   `status()` wiring.
-4. **MAST_unit** — classify every unit-scope route (§4.2); record scope at registration; a test
+   (default `OPERATION`); `admit()` with its table tests. Same-named branch, so the unit's CI
+   resolves it.
+3. **MAST_unit** — classify every unit-scope route (§4.2); record scope at registration; a test
    asserting each route's class and scope, so a new route forces a decision.
-5. **MAST_unit** — fix §9.1 (flags raised before return) and §9.3 (flags cleared only after
+4. **MAST_unit** — fix §9.1 (flags raised before return) and §9.3 (flags cleared only after
    the worker stops). Both are preconditions: without them the gate admits work on top of work.
-6. **MAST_control / MAST_gui** — audits §9.2 and §9.4, and any unit-level endpoints they call
+5. **MAST_control / MAST_gui** — audits §9.2 and §9.4, and any unit-level endpoints they call
    for. Done **before** the gate reaches a production unit: it is enforcing from the first
    deploy (§12.2), so nothing else would catch a refused call short of a failed night.
-7. **MAST_unit** — replace `refuse_while_shutting_down` with the gate and the claim (§5),
+6. **MAST_unit** — replace `refuse_while_shutting_down` with the gate and the claim (§5),
    enforcing; `test_shutdown_gate.py` becomes the admission test suite.
-8. Later, separately: MAST_spec (§10); the inactivity
-   shutdown (unit_idleness §7).
+7. Later, separately: MAST_spec (§10).
 
-## 12. Decisions taken (2026-10-12)
+## 12. Decisions taken (2026-10-12), and one reopened (2026-10-13)
 
 1. **Calibrator** — unit scope, provisionally. `/calibrate` is work in progress, to be adopted
    or ditched; its routes are classified as in §4.2 meanwhile.
@@ -353,6 +326,19 @@ here, so its route list is not in this plan.
    set when `FindingHome` ends normally, cleared by an abort or a disconnect — and report
    "not homed" in `why_not_operational`.
 4. **ABORT verbs** — a flag is cleared only after its worker threads have stopped (§9.3).
+
+5. **Reopened 2026-10-13: does a cooling camera make the unit busy for admission?** `why_busy`
+   excludes `ImagerActivities.CoolingDown`, decided for idleness: a camera cooling after
+   `startup` is preparation, and must not keep a unit from going idle. For admission the
+   question differs: during the cool-down (1–2 min after `startup`) the imager is not
+   operational, so row 6 would admit, say, an `/expose` taken warm. Options:
+   - **(a) admit** — row 6 as written; a caller that cares checks `operational` first;
+   - **(b) refuse operations** — the gate adds `CoolingDown` to its own busy set (`why_busy`
+     plus the imager's `CoolingDown`), leaving `why_busy` itself as idleness defined it;
+   - **(c) refuse only imager-dependent operations** — needs a per-route "uses the camera"
+     declaration; more to classify.
+   *Leaning (b)*: one extra term at the gate, no per-route classification, and the refusal says
+   why ("the unit is busy (imager: CoolingDown)"). Undecided.
 
 ## 13. Verification
 
