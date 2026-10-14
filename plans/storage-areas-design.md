@@ -58,17 +58,6 @@ mast-supervisor waits for it before starting the unit, and revives it (§8). Lea
 products on the RAM disk while the share is down — the current deferral design — also
 risks filling it during a long outage.
 
-### 1.5 Today, a missing `D:` makes the startup sweep walk all of `C:/MAST/`
-
-With `D:` unmapped, `ram` falls back to `C:/MAST/`, and `start_product_relocation_sweep`
-([filer.py:427](../../common/filer.py#L427)) treats every folder there holding files as a
-leftover product. On mast00 that is the RAM-disk image folder (`Shared/`), `iers-cache/`,
-`config-db-cache/`, `Kepler/`, `Campaigns/` and scripts. With the share mapped they are
-moved to it — including the image needed to revive `D:`; with the share unmapped too,
-each is moved onto itself and loses its files (§1.2). A missing `D:` is exactly the state
-an ImDisk task that failed at boot leaves; the supervisor waits for `D:` in `production`,
-but a `development` start from VSCode does not. Stopgap in §12, item 0.
-
 ### 1.4 Path spellings disagree
 
 Roots are stored forward-slashed (`D:/MAST/`); `PathMaker` returns `str(Path(...))`, which
@@ -83,6 +72,17 @@ nothing unless the caller converts first:
   input, replaces every occurrence rather than the leading root, returns `None` silently,
   and on Linux raises `AttributeError` on the `None` RAM entry. Flux metering converts
   before calling it ([session.py:1303](../../unit/src/flux_metering/session.py#L1303)).
+
+### 1.5 Today, a missing `D:` makes the startup sweep walk all of `C:/MAST/`
+
+With `D:` unmapped, `ram` falls back to `C:/MAST/`, and `start_product_relocation_sweep`
+([filer.py:427](../../common/filer.py#L427)) treats every folder there holding files as a
+leftover product. On mast00 that is the RAM-disk image folder (`Shared/`), `iers-cache/`,
+`config-db-cache/`, `Kepler/`, `Campaigns/` and scripts. With the share mapped they are
+moved to it — including the image needed to revive `D:`; with the share unmapped too,
+each is moved onto itself and loses its files (§1.2). A missing `D:` is exactly the state
+an ImDisk task that failed at boot leaves; the supervisor waits for `D:` in `production`,
+but a `development` start from VSCode does not. Stopgap in §12, item 0.
 
 ## 2. Findings on mast00 (2026-10-13/14)
 
@@ -385,8 +385,9 @@ are swept (§6.3); the supervisor does not nudge the unit (§5.1).
 
 ## 12. Work items, in dependency order
 
-0. **Stopgap, now, before any of the rest** — MAST_common: `Filer.move` refuses a move onto
-   itself or into its own subtree (§1.2), and `start_product_relocation_sweep` does not run
+0. **Stopgap, now, before any of the rest** — MAST_common: the `Filer` redirection in
+   `tests/conftest.py` extended to every platform (§13); `Filer.move` refuses a move onto
+   itself or into its own subtree (§1.2); and `start_product_relocation_sweep` does not run
    when `ram.root` is `local.root` (§1.5). MAST_unit: fix `acquisition.py:128` (§1.4).
    Overlaps MAST_common#157 in `move()`; agree the order with its author.
 1. **MAST_provisioning** — `LongPathsEnabled = 1`; verify on mast00 first, then the fleet.
@@ -417,16 +418,67 @@ are swept (§6.3); the supervisor does not nudge the unit (§5.1).
     line (§8); `PUT /ramdisk/restart` on localhost, with its own check, one restart at a
     time, and the backoff limit (§8.1); and supervisor-design §14 amended to match.
 
-Items 0 and 2–4 are useful on their own and carry no behaviour change for a healthy
+Every item lands with its tests at layers 1–3 of §13, green on both runners; the
+`unit_storage` marker comes with item 2. Items 0 and 2–4 are useful on their own and carry no behaviour change for a healthy
 machine.
 
-## 13. Verification
+## 13. Tests and CI
 
-- **Unit tests** against temp roots for every transition: primary → fallback on a failed
-  `mkdir`, back on a successful probe; fallback drained on promotion; a move onto itself
-  refused; a `.partial` never visible under the final name; `make_seq` seeded across all
-  four roots; the log handler following the root and naming fallback files.
-- **On mast00, with the operator present** (both touch a running unit):
+The GitHub runners have no RAM disk, no share and no supervisor, and the Linux runner has
+no drive letters at all. The suites must pass there, while still proving the behaviour
+that only a unit machine can show. Four layers:
+
+**1. Nothing in a test reaches a real root.** Every area is built on temporary folders.
+Today only MAST_unit's `conftest` redirects `Filer` on every platform; MAST_common's does
+it on macOS only ([tests/conftest.py](../../common/tests/conftest.py)). So on the Windows
+runner a bare `Filer()` gets `C:/MAST/` for both `ram` and `shared` — §1.2's collapse —
+and on mast00 the suite touches the real `D:` and share. Common's redirection is extended
+to every platform, as unit's already is, **before** any of this work lands. A test that
+needs particular roots builds a `Filer` from explicit `Location`s rather than patching
+attributes after construction, as several do today.
+
+**2. Failures are simulated, never awaited.** Each failure §5–§8 reacts to has an
+injectable cause on a temporary root:
+
+| Failure | Simulated by |
+|---|---|
+| RAM disk gone | removing (or renaming away) the temporary RAM root |
+| RAM disk full | the write raising `OSError(ENOSPC)` |
+| share unreachable | the root removed, or the probe replaced by one raising a network `OSError` |
+| share hung | the probe replaced by one that blocks; the timeout must fire |
+| `C:` at the ceiling | the free-space reading replaced |
+| supervisor | `SupervisorApi` replaced by a fake answering 200 / 202 / 409 / 503, or not at all |
+
+The monitor's interval and the probe cache's lifetime are parameters, so a test promotes
+in milliseconds rather than a minute. No test sleeps for a real interval.
+
+**3. String logic is tested as strings, on every runner.** `Location`'s canonicalisation,
+`to_top` and the night-folder name match are pure (§4.1), so the Windows and UNC
+spellings are tested on the Linux runner too — `"D:\\MAST\\x"`, `"//host/share/MAST/"`,
+doubled or missing slashes — with no file system involved.
+
+**4. The real thing is marked, and skipped where it cannot run.** Tests that need a unit
+machine's actual storage carry a marker, `unit_storage`, registered and handled like
+`network` (`common/testing/network.py`): skipped in CI (`CI` / `GITHUB_ACTIONS` set)
+without probing, and elsewhere skipped unless the real primary is writable — `D:` for the
+RAM tests, the UNC share for the share tests — with the reason shown. They are
+**non-destructive**: they write and remove a probe folder, move one file onto the share
+and back, check a path over 260 characters when `LongPathsEnabled` is set. They never
+remove `D:`, never call the restart endpoint, never block the share. (Note: SMB goes
+through the Windows redirector, not Python sockets, so the network guard does not see a
+UNC access; the marker, not the guard, is what keeps CI off the share.)
+
+The destructive checks below stay manual, on mast00, with the operator present.
+
+## 14. Verification on mast00
+
+**Covered by the unit tests (§13), on every runner:** primary → fallback on a failed
+`mkdir`, back on a successful probe; fallback drained on promotion; a move onto itself
+refused; a `.partial` never visible under the final name; `make_seq` seeded across all
+four roots; the log handler following the root and naming fallback files; the restart
+request sent for "gone", never for "full", and acted on only for "restored".
+
+**On mast00, with the operator present** (each touches a running unit):
   1. Share: block `mast-ns-control` with a firewall rule for a few minutes during an
      acquisition. Expect one WARNING, products and logs under `C:/MAST/share-fallback/`,
      one INFO on recovery, the fallback drained, nothing left behind, no collision.
