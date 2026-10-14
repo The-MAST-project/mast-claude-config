@@ -289,6 +289,56 @@ the same name would be a collision on every sweep.
   only checks and reports" (decided 2026-10-14).
 - **Does not tell the unit.** The unit's monitor finds the revived disk within a minute
   (§5.1).
+
+### 8.1 `PUT /ramdisk/restart`: clients may ask for a revival
+
+The supervisor serves `PUT /ramdisk/restart` (decided 2026-10-14). It runs in both
+opmodes — under `development` it launches VSCode rather than the app, but it is up — so
+the recovery below works in both.
+
+**Restarting wipes `D:`.** A forced restart detaches the disk whatever holds it open and
+reloads the image, so everything on the RAM disk not yet moved is gone. Every rule below
+exists to make sure it happens only when that is already true.
+
+**Who asks, and when.** `Filer`, when it classifies a failure on the `ram` area (§5.1) as
+**the disk being gone**: the RAM root missing, the device not ready, the path not found
+*on the root itself*. Never for:
+
+- **a full disk** (`ENOSPC`). Full is cured by moving products off, not by wiping them —
+  and a full RAM disk is most likely during a long share outage, exactly when it holds the
+  most unmoved products. Full demotes the area (§5); it never asks for a restart;
+- **a path-level error** (access denied on one file, a missing subfolder).
+
+The request is sent from a background thread, never from the failing write: the area is
+demoted at once regardless (§5), and the write is retried on the fallback.
+
+**What the supervisor does.**
+
+1. **Treats the request as a hint and checks for itself**, with the same writable probe
+   (§4.2). If `D:` is writable it answers `409` with "D: is healthy" and does nothing — a
+   client with a mistaken view cannot wipe a working disk.
+2. **Detaches** (`imdisk -D -m D:`, forced) and **runs the task** (`schtasks /run /tn
+   "\ImDisk Persistent Drive"`), so the image is still named only in the task (§1.3).
+3. **One restart at a time.** Requests arriving during a restart — from the unit's
+   `Filer`, a solver, or the spec's — join the one in progress and get its outcome.
+4. **Backoff, and a limit.** Loading 15 GB into memory takes a while; a disk that dies
+   again at once must not loop. After three failed or short-lived revivals within an hour
+   the supervisor stops trying, raises it in its status, and leaves the units on their
+   fallbacks.
+5. **Also watches on its own.** It already checks the RAM disk as a resource (§8), so it
+   revives without being asked; a client's request only shortens the wait.
+
+**Responses:** `202` with the restart's state while it runs, `200` "restored" once `D:` is
+writable again, `409` "healthy", `503` "giving up" once the limit is reached.
+
+**The client's side.** A `SupervisorApi` in `common/api.py`, beside the other `BaseApi`
+clients, so the spec's `Filer` behaves the same way. On "restored", `Filer` calls
+`check_now("ram")` — acting on its own call's answer, which is not the supervisor nudging
+it (§5.1). A supervisor that does not answer is logged once; the area stays on its
+fallback, and the one-minute check finds the disk whenever it returns.
+
+**Localhost only.** The endpoint wipes a disk, so the supervisor binds it to `127.0.0.1`;
+nothing off the machine can call it.
 - **Its resource wait probes the share by UNC**, replacing the `Z:` check, and keeps the
   RAM-disk check (supervisor-design §5, the `RAM disk + indexes` row).
 - **Reports the event** in its status: "RAM disk lost 02:14, restored 02:15", so a gap in
@@ -354,7 +404,8 @@ are swept (§6.3); the supervisor does not nudge the unit (§5.1).
 4. **MAST_common: the self-move guard** in `Filer.move` (§6.4). Small, independent, and
    worth landing first given §1.2.
 5. **MAST_common: area state + monitor** (§5), the client interface (§5.1), the UNC share
-   root (§9), the two fallbacks (§3).
+   root (§9), the two fallbacks (§3); `SupervisorApi` and the RAM-disk restart request,
+   sent only when the disk is gone (§8.1).
 6. **MAST_common: moves** — destination by `mkdir`, `.partial` + rename, drain of the
    fallbacks and the legacy night folders, the `C:` ceiling (§6).
 7. **MAST_common: RAM loss** — loss reporting, claim dropping, `make_seq` seeding,
@@ -363,7 +414,8 @@ are swept (§6.3); the supervisor does not nudge the unit (§5.1).
 9. **MAST_unit** — solver scratch on the current RAM root; the "indexes missing" report;
    `acquisition.py:128` (if not already in 3).
 10. **supervision** — UNC resource probe, reviving `D:` through the ImDisk task, the status
-    line (§8); and supervisor-design §14 amended to match.
+    line (§8); `PUT /ramdisk/restart` on localhost, with its own check, one restart at a
+    time, and the backoff limit (§8.1); and supervisor-design §14 amended to match.
 
 Items 0 and 2–4 are useful on their own and carry no behaviour change for a healthy
 machine.
@@ -382,7 +434,11 @@ machine.
      acquisition to fail cleanly, the loss reported, the next acquisition on
      `C:/MAST/ram-fallback/`, then promotion after the supervisor restores `D:`, and the
      next `seq` continuing from the share rather than restarting at `0001`.
-  3. Long paths: with `LongPathsEnabled = 1`, move a product whose UNC path exceeds 260
+  3. RAM-disk restart request: with `D:` removed, the unit's request revives it through
+     the supervisor and the unit promotes on the answer, well inside a minute; with `D:`
+     healthy, the same request gets `409` and `D:` is untouched; with `D:` merely full,
+     no request is sent.
+  4. Long paths: with `LongPathsEnabled = 1`, move a product whose UNC path exceeds 260
      characters.
 
 ## Related
@@ -406,7 +462,8 @@ falling back when a write fails; and the RAM disk able to disappear, not only to
 since the ImDisk task is not restarted by Windows. Same day, answering §11: `C:` never above
 90%, losing data rather than filling the system disk; the RAM disk revived from its image,
 which carries the indexes; the legacy night folders swept like any fallback; a one-minute
-promotion check with no supervisor-to-unit nudge; and clients able to report failures but
-not to promote. Kept from review: path conversion stays
+promotion check with no supervisor-to-unit nudge; clients able to report failures but
+not to promote; and the supervisor serving `PUT /ramdisk/restart`, in both opmodes, for
+clients that find the RAM disk gone. Kept from review: path conversion stays
 pure (`to_top`), with fallback chosen by the mover, not the converter; distinct fallback
 folders; drain of the fallbacks; per-file atomicity; loss reporting and sequence seeding.
