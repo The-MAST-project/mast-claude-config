@@ -390,7 +390,8 @@ are swept (§6.3); the supervisor does not nudge the unit (§5.1).
    itself or into its own subtree (§1.2); and `start_product_relocation_sweep` does not run
    when `ram.root` is `local.root` (§1.5). MAST_unit: fix `acquisition.py:128` (§1.4).
    Overlaps MAST_common#157 in `move()`; agree the order with its author.
-1. **MAST_provisioning** — `LongPathsEnabled = 1`; verify on mast00 first, then the fleet.
+1. **MAST_provisioning** (MAST_provisioning#248) — `LongPathsEnabled = 1`; verify on mast00
+   first, then the fleet.
    **Fleet check** at the same time, per Windows machine: `C:` usage against the 90%
    ceiling, the ImDisk task's command line, and `C:\MAST\Shared\` holding only the image
    the task names.
