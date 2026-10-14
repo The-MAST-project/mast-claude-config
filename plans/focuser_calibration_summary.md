@@ -198,6 +198,14 @@ measured from star shapes.
   looking at the other's numbers will be badly wrong.**  The original
   `max_best_hfd_px=12` would have *rejected* the correct first solution
   (Dmin 20.3); it was raised to 35.
+
+  **This has now happened twice, in two unrelated campaigns.**  The spiral search's
+  `MIN_CONFIDENCE` was calibrated on 18 *acquisition* pairs, where a correct answer scores
+  as low as 0.144, and is applied only to *spiral* pairs, where correct answers score ~0.98
+  — so the guard sits below the level at which its own worst failure mode passes.  See
+  `spiral_search_summary.md` §4.  The generalisation worth carrying: a threshold calibrated
+  on one population and applied to another is meaningless even when the code is correct, and
+  no test suite will say so.
 - **The focuser stall is the dominant real-world failure.**  Twice in two nights
   the focuser physically stalled mid-move (200 and ~850 ticks, both directions).
   The software now fails such a move in 120 s with a diagnostic
