@@ -317,7 +317,8 @@ demoted at once regardless (§5), and the write is retried on the fallback.
 1. **Treats the request as a hint and checks for itself**, with the same writable probe
    (§4.2). If `D:` is writable it answers `409` with "D: is healthy" and does nothing — a
    client with a mistaken view cannot wipe a working disk.
-2. **Detaches** (`imdisk -D -m D:`, forced) and **runs the task** (`schtasks /run /tn
+2. **Detaches** (`imdisk -D -m D:`, forced — the task itself is not running: `imdisk -a`
+   mounts and exits, so `schtasks /end` would stop nothing) and **runs the task** (`schtasks /run /tn
    "\ImDisk Persistent Drive"`), so the image is still named only in the task (§1.3).
 3. **One restart at a time.** Requests arriving during a restart — from the unit's
    `Filer`, a solver, or the spec's — join the one in progress and get its outcome.
@@ -338,7 +339,9 @@ it (§5.1). A supervisor that does not answer is logged once; the area stays on 
 fallback, and the one-minute check finds the disk whenever it returns.
 
 **Localhost only.** The endpoint wipes a disk, so the supervisor binds it to `127.0.0.1`;
-nothing off the machine can call it.
+nothing off the machine can call it. MAST_supervision's `api.py` already states this rule
+for any action route; it needs its own listener beside the `0.0.0.0` status server.
+Tracked as MAST_supervision#18.
 - **Its resource wait probes the share by UNC**, replacing the `Z:` check, and keeps the
   RAM-disk check (supervisor-design §5, the `RAM disk + indexes` row).
 - **Reports the event** in its status: "RAM disk lost 02:14, restored 02:15", so a gap in
