@@ -39,12 +39,35 @@ does not cover it: in this state they are under it.
 
 ### 1.3 The RAM disk can fill, and it can disappear
 
-`D:` is an ImDisk RAM disk created by the `\ImDisk Persistent Drive` scheduled task. A
-scheduled task is not monitored or restarted the way a service is, so the disk can die
+`D:` is an ImDisk RAM disk created at boot by the `\ImDisk Persistent Drive` scheduled
+task (runs as `mast`, highest privileges):
+
+```
+imdisk -a -m D: -t vm -f "C:\MAST\Shared\MAST-15GB-indexes-5202+5203.img"
+```
+
+`-t vm -f` loads the image into memory; nothing is written back. The image holds the
+astrometry indexes (`D:\mast-indexes\`) and an empty `D:\MAST\` — checked on mast00
+2026-10-14: nothing under `D:\MAST\` predates the boot except the folder itself, so a
+revival brings back no stale `seq.txt` or products. That property must be kept whenever
+the image is rebuilt.
+
+A scheduled task is not monitored or restarted the way a service is, so the disk can die
 mid-run, and when it does **its contents are gone**, not merely unreachable. The
-mast-supervisor waits for it before starting the unit, and may restart the task (§8).
-Leaving products on the RAM disk while the share is down — the current deferral design —
-also risks filling it during a long outage.
+mast-supervisor waits for it before starting the unit, and revives it (§8). Leaving
+products on the RAM disk while the share is down — the current deferral design — also
+risks filling it during a long outage.
+
+### 1.5 Today, a missing `D:` makes the startup sweep walk all of `C:/MAST/`
+
+With `D:` unmapped, `ram` falls back to `C:/MAST/`, and `start_product_relocation_sweep`
+([filer.py:427](../../common/filer.py#L427)) treats every folder there holding files as a
+leftover product. On mast00 that is the RAM-disk image folder (`Shared/`), `iers-cache/`,
+`config-db-cache/`, `Kepler/`, `Campaigns/` and scripts. With the share mapped they are
+moved to it — including the image needed to revive `D:`; with the share unmapped too,
+each is moved onto itself and loses its files (§1.2). A missing `D:` is exactly the state
+an ImDisk task that failed at boot leaves; the supervisor waits for `D:` in `production`,
+but a `development` start from VSCode does not. Stopgap in §12, item 0.
 
 ### 1.4 Path spellings disagree
 
@@ -142,6 +165,29 @@ everywhere): for each failable area, `PRIMARY` or `FALLBACK`.
 
 Each process runs its own monitor; the probes are cheap.
 
+### 5.1 The client interface
+
+Several clients write under the roots without going through `Filer.move`: the imager
+backends saving FITS, the log handler, solver scratch, `PathMaker`. So:
+
+| Method | For | Notes |
+|---|---|---|
+| `current_root(area) -> str` | anything that creates a folder or file under an area | Asked each time, never held: that is what makes a demotion stick. Cheap. Replaces subscriptions — nothing is notified of a change. |
+| `report_failure(area, path, exc)` | a client whose write under an area failed | A **report**, not a command: `Filer` classifies the error. Area-level — `ENOSPC`, the root missing, the network path gone (`WinError` 53, 59, 64, 67, 1231), a probe timeout — demotes. Path-level — access denied on one file, a missing subfolder, a name in the way — does not: one bad file must not send every product to `C:`. |
+| `check_now(area)` | a client with reason to think the primary is back | Runs the promotion probe at once instead of at the next minute; promotes only if it passes. |
+
+**No client-driven promotion.** Only the probe (§5) promotes: a client cannot know the
+area is healthy, and a wrong promotion costs a round of failed writes.
+
+**The supervisor does not nudge the unit** after reviving `D:`: they are separate
+processes, and the unit's monitor finds the disk within a minute (decided 2026-10-14). A
+`PUT /storage/check` endpoint calling `check_now` is the upgrade if that minute ever
+matters.
+
+A manual hold (`hold_fallback(area, reason)` / `release(area)`, keeping an area on its
+fallback through planned maintenance) is **not** planned; add it if planned maintenance
+turns out to need it. Tests demote through `report_failure` with a real area-level error.
+
 ## 6. Moves
 
 ### 6.1 Choosing the destination at the moment of the move
@@ -173,16 +219,30 @@ The sweeper drains, each pass: the RAM primary, the RAM fallback, and the share 
 area's promotion the share fallback is drained at once rather than at the next 30 s pass.
 The relocation sweep at startup covers the same three.
 
-The legacy `C:/MAST/` night folders that the old construction-time fallback left on some
-machines are **not** swept automatically — they mix products with logs and are not
-certainly products. Listed per machine and moved by hand (§11).
+**The legacy `C:/MAST/<YYYY-MM-DD>/` night folders are swept too** (decided 2026-10-14):
+the folders the old construction-time fallback left whenever a process started with the
+share unreachable. Only top-level folders whose name is a night label — never anything
+else under `C:/MAST/` (`Shared/` with the RAM-disk image, `iers-cache/`,
+`config-db-cache/`, `Kepler/`, `Campaigns/`, scripts). On mast00 (2026-10-14) there are
+82; 81 hold only log files, and `2026-04-19` holds 21 product files under
+`Acquisitions/`.
+
+Their log files are renamed on the way, to the fallback name of §10
+(`mast-<role>-log.fallback.txt`; `mast-STARTUP-log.txt` likewise): the share usually has
+its own `mast-<role>-log.txt` for the same night, and the two differ, so moving them under
+the same name would be a collision on every sweep.
 
 ### 6.4 Guards
 
 - **Never onto itself.** `move` refuses when source and destination resolve to the same
   path, or one is inside the other — fixes §1.2 independently of the root layout.
-- **A free-space floor on `C:`.** A full system disk is worse than a full RAM disk. Below
-  the floor, a spill is refused: the product stays where it is, and an ERROR names it.
+- **`C:` never above 90% used** (decided 2026-10-14). A full system disk is worse than
+  losing data: Windows itself degrades. At or above 90%, writes to either fallback are
+  refused. Products stay where they are (on the RAM disk, while it lives), so they are
+  lost only if the RAM disk fills or dies before the share returns; file logging stops
+  while the console keeps every record. One ERROR when the ceiling is first hit, one INFO
+  when usage drops below it. mast00 was at 92% on 2026-10-14 — 40 GB of unused RAM-disk
+  images — and at 84% once they were removed; the fleet needs the same check (§12).
 - **Bookkeeping stays put** (`seq.txt`, claims, `.partial`), as now.
 
 ## 7. The RAM disk dying
@@ -204,9 +264,9 @@ certainly products. Listed per machine and moved by hand (§11).
 - **Solver scratch** (`D:/MAST/tmp`, [astrometry_dot_net.py:172](../../unit/src/solvers/astrometry_dot_net.py#L172),
   [mastrometry.py:127](../../unit/src/solvers/mastrometry.py#L127)) follows the RAM area's
   current root. Its hard-coded `/cygdrive/d` becomes a conversion of the current root.
-- **The astrometry indexes** live on the RAM disk and are restored by provisioning / the
-  supervisor, not by `Filer`. Until then solving fails; the unit reports *why* ("indexes
-  missing on the RAM disk") rather than a generic solver error.
+- **The astrometry indexes** live on the RAM disk and come back with it: the image holds
+  them (§1.3). Until the supervisor has revived `D:`, solving fails; the unit reports
+  *why* ("indexes missing on the RAM disk") rather than a generic solver error.
 
 ### 7.2 When it comes back, empty
 
@@ -222,10 +282,13 @@ certainly products. Listed per machine and moved by hand (§11).
 
 ## 8. The supervisor
 
-- **Restarts the ImDisk task** when the RAM disk disappears, since a scheduled task is not
-  restarted by Windows. *Changes supervisor-design §14*, which says the supervisor "does
-  not mount the ImDisk … only checks and reports" (decided 2026-10-14). Whether it also
-  restores the indexes, or provisioning keeps that, is open (§11).
+- **Revives the RAM disk** when it disappears, since a scheduled task is not restarted by
+  Windows: by running the task itself (`schtasks /run /tn "\ImDisk Persistent Drive"`),
+  so the image is named in one place. The image brings the indexes back with it (§1.3).
+  *Changes supervisor-design §14*, which says the supervisor "does not mount the ImDisk …
+  only checks and reports" (decided 2026-10-14).
+- **Does not tell the unit.** The unit's monitor finds the revived disk within a minute
+  (§5.1).
 - **Its resource wait probes the share by UNC**, replacing the `Z:` check, and keeps the
   RAM-disk check (supervisor-design §5, the `RAM disk + indexes` row).
 - **Reports the event** in its status: "RAM disk lost 02:14, restored 02:15", so a gap in
@@ -260,19 +323,26 @@ certainly products. Listed per machine and moved by hand (§11).
 
 ## 11. Open questions
 
-1. **The `C:` free-space floor** (§6.4): an absolute size, or a percentage?
-2. **Indexes after a RAM-disk restart:** the supervisor restores them, or provisioning?
-3. **Legacy `C:/MAST/` night folders** on machines where the old fallback was taken: list
-   them per machine before moving anything; some are control's or local logs.
-4. **MAST_spec** builds the same `Filer` on `mast-ns-spec`; its use of the RAM disk and
-   any `Z:` assumptions are not checked (not checked out here). MAST_spec#2 is the same
-   problem from that side.
-5. **Reconnect cost.** The first UNC access after idle may pay a reconnect; the 2 s probe
+1. **MAST_spec** builds the same `Filer` on `mast-ns-spec`; its use of the RAM disk, any
+   `Z:` assumptions and its `C:` usage are not checked (not checked out here). MAST_spec#2
+   is the same problem from that side.
+2. **Reconnect cost.** The first UNC access after idle may pay a reconnect; the 2 s probe
    timeout may need to be longer for `writable()`.
+
+Answered 2026-10-14: the `C:` ceiling is 90% used (§6.4); the RAM disk is revived from
+its image, indexes included, by running the ImDisk task (§1.3, §8); legacy night folders
+are swept (§6.3); the supervisor does not nudge the unit (§5.1).
 
 ## 12. Work items, in dependency order
 
+0. **Stopgap, now, before any of the rest** — MAST_common: `Filer.move` refuses a move onto
+   itself or into its own subtree (§1.2), and `start_product_relocation_sweep` does not run
+   when `ram.root` is `local.root` (§1.5). MAST_unit: fix `acquisition.py:128` (§1.4).
+   Overlaps MAST_common#157 in `move()`; agree the order with its author.
 1. **MAST_provisioning** — `LongPathsEnabled = 1`; verify on mast00 first, then the fleet.
+   **Fleet check** at the same time, per Windows machine: `C:` usage against the 90%
+   ceiling, the ImDisk task's command line, and `C:\MAST\Shared\` holding only the image
+   the task names.
 2. **MAST_common: `Location`** — single canonical root; `readable()` / `writable()` with
    timeout and cache. Tests: canonicalisation (backslashes, missing or doubled slash,
    UNC), case-insensitive comparison on Windows, a probe that hangs.
@@ -283,18 +353,20 @@ certainly products. Listed per machine and moved by hand (§11).
    flux metering's `_frame_path` to use them.
 4. **MAST_common: the self-move guard** in `Filer.move` (§6.4). Small, independent, and
    worth landing first given §1.2.
-5. **MAST_common: area state + monitor** (§5), the UNC share root (§9), the two fallbacks
-   (§3).
+5. **MAST_common: area state + monitor** (§5), the client interface (§5.1), the UNC share
+   root (§9), the two fallbacks (§3).
 6. **MAST_common: moves** — destination by `mkdir`, `.partial` + rename, drain of the
-   fallbacks, the `C:` floor (§6).
+   fallbacks and the legacy night folders, the `C:` ceiling (§6).
 7. **MAST_common: RAM loss** — loss reporting, claim dropping, `make_seq` seeding,
    `PathMaker` asking for the current root (§7).
 8. **MAST_common: logging** (§10).
 9. **MAST_unit** — solver scratch on the current RAM root; the "indexes missing" report;
    `acquisition.py:128` (if not already in 3).
-10. **supervision** — UNC resource probe, ImDisk task restart, the status line (§8).
+10. **supervision** — UNC resource probe, reviving `D:` through the ImDisk task, the status
+    line (§8); and supervisor-design §14 amended to match.
 
-Items 2–4 are useful on their own and carry no behaviour change for a healthy machine.
+Items 0 and 2–4 are useful on their own and carry no behaviour change for a healthy
+machine.
 
 ## 13. Verification
 
@@ -331,6 +403,10 @@ destination chosen when a product is moved, by creating its folder, with a fallb
 local disk; both the RAM disk and the share treated as failable, each with a local
 fallback and a once-a-minute recovery check; the log location taken from `Filer` and
 falling back when a write fails; and the RAM disk able to disappear, not only to fill,
-since the ImDisk task is not restarted by Windows. Kept from review: path conversion stays
+since the ImDisk task is not restarted by Windows. Same day, answering §11: `C:` never above
+90%, losing data rather than filling the system disk; the RAM disk revived from its image,
+which carries the indexes; the legacy night folders swept like any fallback; a one-minute
+promotion check with no supervisor-to-unit nudge; and clients able to report failures but
+not to promote. Kept from review: path conversion stays
 pure (`to_top`), with fallback chosen by the mover, not the converter; distinct fallback
 folders; drain of the fallbacks; per-file atomicity; loss reporting and sequence seeding.
