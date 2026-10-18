@@ -114,6 +114,9 @@ Branches `focus-on-star` in MAST_common (73f03aa) and MAST_unit (e5e0844).
 - **End state:** solved → tracking left on (the star stays put); failed or aborted → tracking stopped, as a
   failed acquisition leaves it. An aborted run leaves the focuser where it is; only a failed one returns it.
 - **Unit status** does not carry focus_on_star; `GET /unit/focus_on_star_status` is the only view.
+- **Near-focus precondition** (2026-10-18): a `/calibrate/focuser` product is preferred; without one, a set
+  `focuser.known_as_good_position` (> 0, the last ps3cli autofocus, where the focuser goes at startup) is accepted.
+  The status reports which as `focus_reference`. mast00 had no product and `known_as_good_position = 13267`.
 - **Found, not fixed (pre-existing, separate issues):**
   - `Solver.solve_and_correct`'s synthesised-acquisition branch (no `latest_acquisition`) passes `conf=` to
     `Acquisition`, whose constructor no longer takes it — a `TypeError` if that branch ever runs.
@@ -143,7 +146,7 @@ Branches `focus-on-star` in MAST_common (73f03aa) and MAST_unit (e5e0844).
 1. ~~Step 0~~ done, see above.
 2. `pytest unit/tests common/tests`; `ruff check`.
 3. Daytime dry run: refusals, star selection visible in status, `/unit/abort` mid-run clears the flag.
-4. On sky after `/calibrate/focuser`: run at zenith, explicit ra/dec, and current position; check the star lands on
+4. On sky after `/calibrate/focuser` (or at `known_as_good_position`): run at zenith, explicit ra/dec, and current position; check the star lands on
    the fibre pixel in the probe frame, the stage stays clear and no guiding starts, V-curve artifacts in
    `Calibration/FocusOnStar/<NNNN>/`, best ≈ calibrated best, config DB unchanged.
 
