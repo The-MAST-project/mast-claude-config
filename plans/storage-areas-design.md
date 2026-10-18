@@ -1,7 +1,7 @@
 # Storage areas: the share by UNC, and fallbacks that follow the machine at run time
 
-> **Status: PLAN (rewritten 2026-10-14), not implemented.** Supersedes the 2026-08-11
-> "migrating the shared area from a mapped drive to UNC paths" draft, which this file
+> **Status: PLAN (rewritten 2026-10-14, terminology revised 2026-10-18), not implemented.** Supersedes the 2026-08-11
+> "migrating the shared storage area from a mapped drive to UNC paths" draft, which this file
 > replaces. Tracked as `MAST_common#26`.
 >
 > A unit has two storage areas that can fail while its long-running processes are up:
@@ -96,25 +96,54 @@ but a `development` start from VSCode does not. Stopgap in §12, item 0.
 | Long paths | **`LongPathsEnabled = 0`.** Longest product path on the share: 238 chars as `Z:`, **263 as UNC** — over `MAX_PATH`. Blocker (§9). |
 | `Z:` anywhere else? | Only `filer.py` in common and unit production code. Nothing in the config DB (`units`, `sites`, `services`, `specs` scanned for `Z:`, `mast-share`, UNC prefixes). |
 
-## 3. Areas, roots and fallbacks
+## 3. Storage areas, roots and fallbacks
 
-| Area | Primary (Windows) | Fallback | Fails by |
+`StorageArea` is an enum — `RAM`, `SHARE`, `LOCAL` — and **replaces `FilerTop`**
+(`Local` / `Shared` / `Ram`), whose only users are `change_top_to` / `move_to` (§12,
+item 3) and flux metering. Every method below that takes a storage area takes a
+`StorageArea`; in prose, "storage area" means one of the three.
+
+| `StorageArea` | Primary (Windows) | Fallback | Fails by |
 |---|---|---|---|
-| `ram` | `D:/MAST/` | `C:/MAST/ram-fallback/` | filling (`ENOSPC`), or the ImDisk task dying |
-| `share` | `//<controller_host>/mast-share/MAST/<hostname>/` | `C:/MAST/share-fallback/` | the share or the network becoming unreachable |
-| `local` | `C:/MAST/` | — | (it is the fallback) |
+| `RAM` | `D:/MAST/` | `C:/MAST/ram-fallback/` | filling (`ENOSPC`), or the ImDisk task dying |
+| `SHARE` | `//<controller_host>/mast-share/MAST/<hostname>/` | `C:/MAST/share-fallback/` | the share or the network becoming unreachable |
+| `LOCAL` | `C:/MAST/` | — | (it is the fallback) |
 
 `share_root` (`//<controller_host>/mast-share/MAST/`) is kept for the share-level probe
-(§4.3). `machine` (the per-machine folder) is the `share` area.
+(§4.3) and for whatever belongs to the share as a whole rather than to one machine.
 
 **The two fallbacks are different folders, by rule.** If both were `C:/MAST/`, a RAM
 product written to the RAM fallback while the share is down would be "moved" onto itself —
 §1.2's deletion. `Filer.move` additionally refuses a move whose source and destination
 resolve to the same path or one inside the other (§6.4).
 
-**Linux** (control) is unchanged in behaviour: `ram` is `None`, and the share is the local
-`/Storage/mast-share/MAST` that the control machine serves. It gets the new `Location` and
-`to_top`, and no fallback state.
+**Linux** (control): `RAM` is `None`, and the share is the local `/Storage/mast-share/MAST`
+that the control machine serves. It gets the new `Location` and `to_top`, and no fallback
+state.
+
+### 3.1 `SHARE` is per-machine everywhere, so `Filer.machine` goes
+
+`Filer.machine` exists only because `shared` means two things today: `Z:/MAST/<hostname>/`
+on Windows, but the share **root** `/Storage/mast-share/MAST` on Linux, with no hostname
+([filer.py:120-135](../../common/filer.py#L120)). `machine` was added (2026-08) as the
+per-machine folder on both, after control's logs had landed at the top of the share for
+89 nights.
+
+With `SHARE` defined as this machine's folder on every platform — on Linux
+`/Storage/mast-share/MAST/<hostname>/` — `machine` *is* `SHARE`, and is removed:
+
+| Today | Becomes |
+|---|---|
+| `Filer().machine.root` — `machine_log_root` ([filer.py:203](../../common/filer.py#L203)), flux-metering correlation ([correlate.py:58](../../unit/src/flux_metering/correlate.py#L58)) | `Filer().current_root(StorageArea.SHARE)` |
+| `Filer().shared.root` used for the share as a whole, on control — `make_plans_folder`, `make_run_folder` ([paths.py:229, 237](../../common/paths.py#L229)) | `Filer().share_root.root`. **Same path on Linux, so no change for control, `MAST_gui` or the plans watcher** ([fswatcher.py:61](../../common/fswatcher.py#L61)). On a unit these resolve to `Z:/MAST/<hostname>/plans` today, a per-machine folder nothing reads; they are control's, so the change only makes the name honest. |
+| `accessible_shared_root()` — its docstring and `CLAUDE.md` warn it is not per-machine on Linux | `current_root(StorageArea.SHARE)`; the warning goes with the distinction. |
+| `machine` in test fakes ([unit/tests/conftest.py:152](../../unit/tests/conftest.py#L152), [test_machine_log_root.py](../../common/tests/test_machine_log_root.py)) | gone; the fakes build a `Filer` from explicit `Location`s (§13). |
+
+Before landing, check `MAST_control` and `MAST_gui` for any other `Filer().shared` use that
+means the share root (neither is checked out here). Any such caller moves to `share_root`
+in the same change; one left on `shared` would silently gain `/<hostname>/` on control.
+`machine_log_root` keeps its name: it is "this machine's log root" and now reads `SHARE`.
+`CLAUDE.md`'s Logging section is updated with item 8.
 
 ## 4. `Location`
 
@@ -146,18 +175,18 @@ A new or renamed machine's folder does not exist until something creates it
 probes `share_root`, as `machine_log_root` already does, and the machine's folder is
 created on demand.
 
-## 5. Area state: demote on failure, promote by a monitor
+## 5. Storage-area state: demote on failure, promote by a monitor
 
 Process-wide state on `Filer` (class-level, like `_pending`: `Filer()` is constructed
-everywhere): for each failable area, `PRIMARY` or `FALLBACK`.
+everywhere): for each failable `StorageArea` (`RAM`, `SHARE`), `PRIMARY` or `FALLBACK`.
 
 - **Demotion is immediate, on any failed use.** A move, `mkdir`, open or write that fails
-  against the primary with an `OSError` marks the area `FALLBACK` and is retried against
+  against the primary with an `OSError` marks the storage area `FALLBACK` and is retried against
   the fallback. Waiting for the monitor would mean a minute of failures.
 - **Promotion is the monitor's.** A daemon thread, once a minute, checks each demoted
-  area's primary with `writable()` (create and remove a folder). On success the area
+  storage area's primary with `writable()` (create and remove a folder). On success it
   returns to `PRIMARY`, and the drain (§6.3) is triggered.
-- **Reported once per transition:** one WARNING on demotion (area, primary, fallback,
+- **Reported once per transition:** one WARNING on demotion (storage area, primary, fallback,
   cause), one INFO on promotion, plus the drain's summary. Not a line per file — the
   pattern `NotificationWorker` already uses.
 - `Filer` never recreates `D:` or remounts anything. Recreating the RAM disk is the
@@ -172,21 +201,21 @@ backends saving FITS, the log handler, solver scratch, `PathMaker`. So:
 
 | Method | For | Notes |
 |---|---|---|
-| `current_root(area) -> str` | anything that creates a folder or file under an area | Asked each time, never held: that is what makes a demotion stick. Cheap. Replaces subscriptions — nothing is notified of a change. |
-| `report_failure(area, path, exc)` | a client whose write under an area failed | A **report**, not a command: `Filer` classifies the error. Area-level — `ENOSPC`, the root missing, the network path gone (`WinError` 53, 59, 64, 67, 1231), a probe timeout — demotes. Path-level — access denied on one file, a missing subfolder, a name in the way — does not: one bad file must not send every product to `C:`. |
-| `check_now(area)` | a client with reason to think the primary is back | Runs the promotion probe at once instead of at the next minute; promotes only if it passes. |
+| `current_root(area: StorageArea) -> str` | anything that creates a folder or file under a storage area | Asked each time, never held: that is what makes a demotion stick. Cheap. Replaces subscriptions — nothing is notified of a change. |
+| `report_failure(area: StorageArea, path, exc)` | a client whose write under a storage area failed | A **report**, not a command: `Filer` classifies the error. Storage-area-level — `ENOSPC`, the root missing, the network path gone (`WinError` 53, 59, 64, 67, 1231), a probe timeout — demotes. Path-level — access denied on one file, a missing subfolder, a name in the way — does not: one bad file must not send every product to `C:`. |
+| `check_now(area: StorageArea)` | a client with reason to think the primary is back | Runs the promotion probe at once instead of at the next minute; promotes only if it passes. |
 
 **No client-driven promotion.** Only the probe (§5) promotes: a client cannot know the
-area is healthy, and a wrong promotion costs a round of failed writes.
+storage area is healthy, and a wrong promotion costs a round of failed writes.
 
 **The supervisor does not nudge the unit** after reviving `D:`: they are separate
 processes, and the unit's monitor finds the disk within a minute (decided 2026-10-14). A
 `PUT /storage/check` endpoint calling `check_now` is the upgrade if that minute ever
 matters.
 
-A manual hold (`hold_fallback(area, reason)` / `release(area)`, keeping an area on its
+A manual hold (`hold_fallback(area, reason)` / `release(area)`, keeping a storage area on its
 fallback through planned maintenance) is **not** planned; add it if planned maintenance
-turns out to need it. Tests demote through `report_failure` with a real area-level error.
+turns out to need it. Tests demote through `report_failure` with a real storage-area-level error.
 
 ## 6. Moves
 
@@ -194,7 +223,7 @@ turns out to need it. Tests demote through `report_failure` with a real area-lev
 
 `Filer.move` (not `MoveGuardian` — its job stays "never move what is being written")
 creates the destination folder **as the accessibility test**: it is the real operation, so
-it cannot disagree with a probe. Failure demotes `share` and the destination is rebuilt
+it cannot disagree with a probe. Failure demotes `SHARE` and the destination is rebuilt
 under the share fallback.
 
 **Spill immediately.** When the share is unreachable, products go to the share fallback
@@ -215,8 +244,8 @@ fallback, and the existing merge (`_merge_into`) recombines the two halves on dr
 ### 6.3 Draining the fallbacks
 
 The sweeper drains, each pass: the RAM primary, the RAM fallback, and the share fallback.
-`to_top` accepts the primary **and** the fallback as source roots of an area. On the share
-area's promotion the share fallback is drained at once rather than at the next 30 s pass.
+`to_top` accepts the primary **and** the fallback as source roots of a `StorageArea`. On `SHARE`'s
+promotion the share fallback is drained at once rather than at the next 30 s pass.
 The relocation sweep at startup covers the same three.
 
 **The legacy `C:/MAST/<YYYY-MM-DD>/` night folders are swept too** (decided 2026-10-14):
@@ -251,18 +280,18 @@ the same name would be a collision on every sweep.
 
 - **Producers mid-write fail**, with an `OSError` on a `D:` path. That is correct; the
   acquisition must fail cleanly (flags ended, folder released) so that the next one starts
-  on the fallback. Folder creation therefore asks `Filer` for the area's *current* root
+  on the fallback. Folder creation therefore asks `Filer` for the storage area's *current* root
   each time — `PathMaker` stops defaulting to `Filer().ram.root` held from earlier
   ([paths.py:94, 131, 161, 174, 198](../../common/paths.py#L94)).
 - **Losses are reported.** Today `_drain_pending` drops a queued move whose source no
   longer exists, silently ([filer.py:575](../../common/filer.py#L575)), and the folder
   reaper counts a vanished product as moved because it tests `os.path.exists`
-  ([filer.py:1014](../../common/filer.py#L1014)). With the RAM area demoted, both log one
+  ([filer.py:1014](../../common/filer.py#L1014)). With `RAM` demoted, both log one
   ERROR listing the products lost with the disk.
 - **Claims on the dead root are dropped**, not released one by one: their lock files went
   with the disk, and the open handles `MoveGuardian._folder_claims` keeps are stale.
 - **Solver scratch** (`D:/MAST/tmp`, [astrometry_dot_net.py:172](../../unit/src/solvers/astrometry_dot_net.py#L172),
-  [mastrometry.py:127](../../unit/src/solvers/mastrometry.py#L127)) follows the RAM area's
+  [mastrometry.py:127](../../unit/src/solvers/mastrometry.py#L127)) follows `RAM`'s
   current root. Its hard-coded `/cygdrive/d` becomes a conversion of the current root.
 - **The astrometry indexes** live on the RAM disk and come back with it: the image holds
   them (§1.3). Until the supervisor has revived `D:`, solving fails; the unit reports
@@ -300,16 +329,16 @@ the recovery below works in both.
 reloads the image, so everything on the RAM disk not yet moved is gone. Every rule below
 exists to make sure it happens only when that is already true.
 
-**Who asks, and when.** `Filer`, when it classifies a failure on the `ram` area (§5.1) as
+**Who asks, and when.** `Filer`, when it classifies a failure on `StorageArea.RAM` (§5.1) as
 **the disk being gone**: the RAM root missing, the device not ready, the path not found
 *on the root itself*. Never for:
 
 - **a full disk** (`ENOSPC`). Full is cured by moving products off, not by wiping them —
   and a full RAM disk is most likely during a long share outage, exactly when it holds the
-  most unmoved products. Full demotes the area (§5); it never asks for a restart;
+  most unmoved products. Full demotes `RAM` (§5); it never asks for a restart;
 - **a path-level error** (access denied on one file, a missing subfolder).
 
-The request is sent from a background thread, never from the failing write: the area is
+The request is sent from a background thread, never from the failing write: `RAM` is
 demoted at once regardless (§5), and the write is retried on the fallback.
 
 **What the supervisor does.**
@@ -334,8 +363,8 @@ writable again, `409` "healthy", `503` "giving up" once the limit is reached.
 
 **The client's side.** A `SupervisorApi` in `common/api.py`, beside the other `BaseApi`
 clients, so the spec's `Filer` behaves the same way. On "restored", `Filer` calls
-`check_now("ram")` — acting on its own call's answer, which is not the supervisor nudging
-it (§5.1). A supervisor that does not answer is logged once; the area stays on its
+`check_now(StorageArea.RAM)` — acting on its own call's answer, which is not the supervisor nudging
+it (§5.1). A supervisor that does not answer is logged once; `RAM` stays on its
 fallback, and the one-minute check finds the disk whenever it returns.
 
 **Localhost only.** The endpoint wipes a disk, so the supervisor binds it to `127.0.0.1`;
@@ -362,11 +391,11 @@ Tracked as MAST_supervision#18.
 
 ## 10. Logging
 
-- `DailyFileHandler` asks `Filer` for the `share` area's current root **on every record**
+- `DailyFileHandler` asks `Filer` for `current_root(StorageArea.SHARE)` **on every record**
   and reopens when it differs from the open file — cheap, a string comparison. Logs move
   to the fallback on demotion and back on promotion, instead of `base_dir` fixed at
   startup.
-- **A write that fails** demotes the area through `Filer` and is retried on the fallback.
+- **A write that fails** demotes `SHARE` through `Filer` and is retried on the fallback.
 - **Re-entrancy guard.** `Filer` reporting the demotion would log back into the handler
   that is failing. The handler holds a guard; a transition reported from inside it goes to
   stderr, and is repeated to the file once it is writable.
@@ -401,15 +430,15 @@ are swept (§6.3); the supervisor does not nudge the unit (§5.1).
 2. **MAST_common: `Location`** — single canonical root; `readable()` / `writable()` with
    timeout and cache. Tests: canonicalisation (backslashes, missing or doubled slash,
    UNC), case-insensitive comparison on Windows, a probe that hangs.
-3. **MAST_common: `to_top` / `locate`** — `to_top(area, path)` pure (separator-agnostic,
+3. **MAST_common: `to_top` / `locate`** — `to_top(area: StorageArea, path)` pure (separator-agnostic,
    leading root only, Linux-safe, raises when nothing matches, accepts primary and
    fallback); `locate(path)` finds a product on share, share fallback, RAM, RAM fallback.
-   Replace `change_top_to` and `move_to` (no callers); fix `acquisition.py:128` and
+   Replace `change_top_to` and `move_to` (no callers) and `FilerTop` with `StorageArea` (§3); fix `acquisition.py:128` and
    flux metering's `_frame_path` to use them.
 4. **MAST_common: the self-move guard** in `Filer.move` (§6.4). Small, independent, and
    worth landing first given §1.2.
-5. **MAST_common: area state + monitor** (§5), the client interface (§5.1), the UNC share
-   root (§9), the two fallbacks (§3); `SupervisorApi` and the RAM-disk restart request,
+5. **MAST_common: `StorageArea` state + monitor** (§5), the client interface (§5.1), the UNC share
+   root (§9), the two fallbacks (§3); `SHARE` per-machine on Linux and `Filer.machine` removed (§3.1); `SupervisorApi` and the RAM-disk restart request,
    sent only when the disk is gone (§8.1).
 6. **MAST_common: moves** — destination by `mkdir`, `.partial` + rename, drain of the
    fallbacks and the legacy night folders, the `C:` ceiling (§6).
@@ -432,7 +461,7 @@ The GitHub runners have no RAM disk, no share and no supervisor, and the Linux r
 no drive letters at all. The suites must pass there, while still proving the behaviour
 that only a unit machine can show. Four layers:
 
-**1. Nothing in a test reaches a real root.** Every area is built on temporary folders.
+**1. Nothing in a test reaches a real root.** Every storage area is built on temporary folders.
 Today only MAST_unit's `conftest` redirects `Filer` on every platform; MAST_common's does
 it on macOS only ([tests/conftest.py](../../common/tests/conftest.py)). So on the Windows
 runner a bare `Filer()` gets `C:/MAST/` for both `ram` and `shared` — §1.2's collapse —
@@ -523,3 +552,7 @@ not to promote; and the supervisor serving `PUT /ramdisk/restart`, in both opmod
 clients that find the RAM disk gone. Kept from review: path conversion stays
 pure (`to_top`), with fallback chosen by the mover, not the converter; distinct fallback
 folders; drain of the fallbacks; per-file atomicity; loss reporting and sequence seeding.
+
+Revised 2026-10-18 with Arie: `StorageArea` as the term and the enum (replacing `FilerTop`),
+and `Filer.machine` removed by making `SHARE` per-machine on Linux too, with control's
+whole-share folders (plans, runs) moved onto `share_root` (§3.1).
