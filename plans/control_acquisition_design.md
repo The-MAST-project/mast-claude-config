@@ -51,8 +51,10 @@ spectrograph.
   unit feeds both instruments, through the common slit. The `required_units` count goes,
   because `quorum` says how many must succeed.
 - **`allocated_units` is renamed `scheduled_units`**: it says who fills it.
-- **`requested_exposure_duration`** (and `requested_number_of_exposures`) move from
-  `Target` into `SpectrographModel`, required only when `instrument` is not `None`.
+- **The exposure fields move from `Target` into `SpectrographModel`**:
+  `requested_exposure_duration` (required only when `instrument` is not `None`),
+  `requested_number_of_exposures`, `max_exposure_duration` and `repeats`. `Target`
+  describes the sky only.
 - **Existing plan files are rewritten once** (section 3.5), not migrated on every load.
 - **Run-time state leaves the `Plan` model.** The model is the plan; a `PlanExecution`
   holds the workers.
@@ -155,14 +157,33 @@ loses nothing, and its `timeout_to_guiding` switches to `DEFAULT_TIMEOUT_TO_GUID
 
 ### 3.2 Exposure fields move into the spectrograph model (`models/spectrographs.py`)
 
-`Target.requested_exposure_duration` and `Target.requested_number_of_exposures` move to
-`SpectrographModel`, under the same names and `json_schema_extra`. A `model_validator`
-requires `requested_exposure_duration` when `instrument is not None`.
-`requested_number_of_exposures` keeps its default of 1. `Target` keeps what describes the
-sky: coordinates, `max_exposure_duration`, `repeats`.
+Four fields move from `Target` to `SpectrographModel`, under the same names, defaults and
+`json_schema_extra`. They all describe what the spectrograph does, and a plan without one
+has no use for them:
 
-`Batch.model_post_init` reads both fields from `plan.target` today
-(`batches.py:53-67`), and switches to `plan.spec_assignment`.
+| Field | Default | In `SpectrographModel` |
+| --- | --- | --- |
+| `requested_exposure_duration` | `None` | **required when `instrument is not None`** (a `model_validator`) |
+| `requested_number_of_exposures` | `1` | unchanged |
+| `max_exposure_duration` | `None` | unchanged |
+| `repeats: RepeatsModel` | `every = "Only once"`, `nights = 1` | unchanged |
+
+`Target` keeps what describes the sky: `name`, `magnitude`, `ra_hours`, `dec_degrees`,
+`science`. A generated plan, which has no `spec_assignment`, therefore has no exposure
+fields and no `repeats` at all (Appendix A).
+
+Every reader follows the move:
+
+- `Batch.model_post_init` reads the exposure fields from `plan.target`
+  (`batches.py:53-67`), and switches to `plan.spec_assignment`.
+- MAST_control's `NewPlanTemplate` (`planning.py:142-152`) builds them into its `target`
+  dict, and moves them into `spec_assignment`.
+- MAST_gui's `plan_new.js:137` and `plan_view.js:68` read
+  `getFieldValue('target', 'requested_exposure_duration')` and `requested_number_of_exposures`
+  by section, and switch to `'spec_assignment'`.
+- `control/tools/generate_mockup_plans.py:208` writes them under `[target]`, and moves them;
+  the checked-in plans under `control/tools/mockup_plans/` are regenerated (or put through
+  the rewrite tool, 3.5).
 
 ### 3.3 Run-time state out of the model
 
@@ -196,8 +217,10 @@ plan folder:
 - A target with a `name` but without both coordinates usable is resolved (3.8), its
   coordinates written in and a `resolved` event appended. A name that does not resolve is
   reported and the file left alone. The tool needs the network, on mast-ns-control.
-- `target.requested_exposure_duration` / `requested_number_of_exposures` move into
-  `[spec_assignment]`.
+- `target.requested_exposure_duration`, `requested_number_of_exposures`,
+  `max_exposure_duration` and `[target.repeats]` move into `[spec_assignment]`. A plan
+  with no `[spec_assignment]` and any of them set is reported and left alone: there is no
+  spectrograph for them to describe.
 - Every rewritten file must load with the new `Plan`; the tool reports any that do not and
   changes nothing in a file it cannot make valid. `--dry-run` lists the changes.
 
@@ -708,6 +731,8 @@ Aborts the current execution (5.8). No current execution: error `"no acquisition
 - `plan_to_toml` writes `scheduled_units`, never `allocated_units`.
 - `SpectrographModel(instrument=...)` without `requested_exposure_duration` is refused;
   with `instrument=None` it is accepted.
+- `Target` no longer accepts `repeats` or `max_exposure_duration`; `SpectrographModel`
+  carries all four exposure fields with their defaults.
 - `AcquisitionOutcome` round-trips through `FullUnitStatus`; a status without
   `acquisition` parses to `None`.
 - `parse_target`: decimal, colon- and space-separated sexagesimal, `None`/`""`, RA of 0 (already
@@ -724,8 +749,8 @@ Aborts the current execution (5.8). No current execution: error `"no acquisition
 
 **The rewrite tool**: `allocated_units` renamed with its value; an empty `requested_units`
 becomes `"any"`; a quorum above an explicit list is reported and the file untouched;
-exposure fields moved; `--dry-run` writes nothing; every output loads.
-
+all four exposure fields moved, `repeats` included; a spectrograph-free plan carrying any
+of them reported and untouched; `--dry-run` writes nothing; every output loads.
 **MAST_unit**
 
 - The outcome moves `RUNNING -> GUIDING -> ENDED` on a stubbed handover; `FAILED` on a phase
@@ -783,7 +808,8 @@ row, shared by the unit, control and spec roles, so a common bump reaches every 
 2. **The model and the engine, together, on control.** common: 3.1-3.4, `resolve_target`. control: the
    engine, the endpoints, `NewPlanTemplate`. gui: the plan forms (the moved exposure
    fields, no `required_units`, `"any"` as a unit choice), the unit filter on
-   `requested_units`, and `ScrapingResults.known_units`. Run the rewrite tool (3.5) on mast-ns-control before
+   `requested_units`, `ScrapingResults.known_units`, and `plan_new.js` / `plan_view.js`
+   reading the exposure fields from `spec_assignment`. Run the rewrite tool (3.5) on mast-ns-control before
    control starts. This is the **first MAST_control pin bump since `8f6a917`**, so it also
    carries every control commit since.
 
@@ -832,10 +858,6 @@ scheduled_units = []
 [target]
 ra_hours = 12.5125
 dec_degrees = 20.25
-
-[target.repeats]
-every = "Only once"
-nights = 1
 
 [[events]]
 what = "generated"
