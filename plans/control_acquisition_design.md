@@ -8,7 +8,7 @@
 > one worker thread per unit and a quorum.
 >
 > **Status: plan only, not implemented.** Reworked on 2026-10-19 around the generated plan;
-> the 2026-10-18 version designed a separate acquisition path. Open points are in section 11.
+> the 2026-10-18 version designed a separate acquisition path. No questions are open.
 > Code baseline: MAST_common `master` @ `df2669f`, MAST_unit `main` @ `9fc7be6`,
 > MAST_control `master` @ `abbfe8d`.
 >
@@ -39,9 +39,9 @@ spectrograph.
   The plan succeeds once `quorum` units succeed, and fails as soon as that becomes
   impossible. No stage waits for every unit.
 - **The generated plan is written to a TOML file, then loaded from it**, which gives it a
-  ULID and the same event trail and folder moves as any plan. It is `approved = true`
-  (nothing else will approve it: it skips `pending/`) and `production = false` (an
-  engineering acquisition, not science). Appendix A shows one.
+  ULID and the same event trail and folder moves as any plan. It is `owner = "mast"`,
+  `approved = true` (nothing else will approve it: it skips `pending/`) and
+  `production = false` (an engineering acquisition, not science). Appendix A shows one.
 - **Every unit's transitions are events in the plan file**, not only the plan's outcome,
   so the file says which units made the quorum and why the others did not.
 - **The engine creates the plan's run folder**, for every plan.
@@ -57,6 +57,10 @@ spectrograph.
 - **Run-time state leaves the `Plan` model.** The model is the plan; a `PlanExecution`
   holds the workers.
 - **The unit's `execute_assignment` goes.** The workers drive the unit's own endpoints.
+- **`Guider.is_engaged`** keeps today's meaning of `is_guiding` (`Guiding` or `LostLock`) for
+  idleness and stop/abort, while `is_guiding` means locked (6.2).
+- **`start_acquisition` refuses while a science plan is in progress**; it aborts only a
+  previous acquisition.
 - From the 2026-10-18 design, still in force: units are checked against the site's
   `deployed_units` and refused when in `units_in_maintenance`; `initialized` and
   `shutdown` are started up first, `startedup` goes on, anything else fails the unit; a
@@ -417,7 +421,9 @@ generated plan never has one, so it never touches the spectrograph.
 At success, the spectrograph is checked (operational, `activities == Idle`) and sent its
 assignment, then polled until idle -- today's `expose` and `wait_for_spec_done`, moved onto
 the execution and using `Event.wait`, not `time.sleep`. While it exposes, a unit that stops
-guiding is reported in the plan's events; the exposure is not stopped for it (section 11).
+guiding is recorded as a `unit-stopped-guiding` event (5.9). The engine does not stop the
+exposure for it: whether to stop an exposure belongs to whoever starts it, and is out of
+scope here (section 10).
 
 ### 5.8 Terminate and abort
 
@@ -534,7 +540,7 @@ unit's `focus_on_star`); `autofocus_on_star: bool = False`; `quorum: int | None 
 (defaults to `len(units)`; required with `units=any`, where the count is not known until the units are resolved).
 
 1. Build the plan: `target.ra_hours` and `target.dec_degrees` as decimals from
-   `parse_target`, `requested_units`, `autofocus`, `quorum`, `approved = true`,
+   `parse_target`, `requested_units`, `autofocus`, `quorum`, `owner = "mast"`, `approved = true`,
    `production = false`, no `spec_assignment`, and an event
    `EventModel(what="generated", details=["start_acquisition", "ra=<as typed>",
    "dec=<as typed>"])`, which keeps the coordinates the operator typed. Validate it as a
@@ -542,7 +548,8 @@ unit's `focus_on_star`); `autofocus_on_star: bool = False`; `quorum: int | None 
 2. If an acquisition-only plan is in progress, abort it and wait up to **30 s** for its
    units to clear `Aborting`. If any requested unit is still `Aborting` after that, or is
    `Aborting` for another reason, refuse: `"<unit>: still aborting"`. If a plan **with a
-   spectrograph** is in progress, refuse (section 11).
+   spectrograph** is in progress, refuse: `"plan <ulid> is in progress"`. A science plan is never
+   aborted to make room for an acquisition.
 3. Write the TOML with `plan_to_toml` (3.4) **straight into `in-progress/`** as
    `PLAN_<ulid>.toml`, a fresh ULID. It
    bypasses `submitted/` and `pending/`, and so `submit_plan`'s "instrument must be
@@ -672,17 +679,8 @@ outcome". It does not hang.
   `in-progress/`, but nothing picks it up. A file found in `in-progress/` at start-up is
   logged; what to do with it is not decided here.
 - Running two plans at once. There is one `in_progress`.
-
-## 11. Open
-
-- **`is_engaged`** (6.2) is this design's proposal, not a decision. The alternative is to
-  keep `is_guiding` as today and add `is_locked` for the completion test only.
-- **`start_acquisition` while a spectrograph plan runs**: refuse (proposed), or abort it as
-  an acquisition is aborted?
-- **A unit that stops guiding during the spectrograph exposure** (5.7): record it
-  (proposed), or stop the exposure when guiding drops below quorum?
-- **The generated plan's `owner`**: none today. If the endpoints learn who calls them, it
-  should be recorded.
+- **Stopping a spectrograph exposure because units stopped guiding.** The engine records it
+  (5.7); deciding to stop belongs to whoever starts the exposure.
 
 ## Appendix A. A generated plan, start to end
 
@@ -694,11 +692,12 @@ PUT /mast/api/v1/control/start_acquisition?units=mast01&units=mast03&units=mast0
 ```
 
 `in-progress/PLAN_01JAD8Q4ZK7V3M2XG9T6R5N0HB.toml` as `start_acquisition` writes it (7.1).
-No `[spec_assignment]`, `owner` or `constraints`: they are `None` and dropped. No
+No `[spec_assignment]` or `constraints`: they are `None` and dropped. No
 `[target.science]`: it is empty and pruned (3.4).
 
 ```toml
 ulid = "01JAD8Q4ZK7V3M2XG9T6R5N0HB"
+owner = "mast"
 mockup = false
 merit = 1
 timeout_to_guiding = 600.0
