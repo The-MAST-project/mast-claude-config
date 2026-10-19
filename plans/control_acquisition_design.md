@@ -193,6 +193,9 @@ plan folder:
 - An empty or missing `requested_units` becomes `"any"`: under the scheduler design an
   empty list already meant "the scheduler chooses". A plan whose `quorum` is above the
   length of its explicit `requested_units` is reported and left alone.
+- A target with a `name` but without both coordinates usable is resolved (3.8), its
+  coordinates written in and a `resolved` event appended. A name that does not resolve is
+  reported and the file left alone. The tool needs the network, on mast-ns-control.
 - `target.requested_exposure_duration` / `requested_number_of_exposures` move into
   `[spec_assignment]`.
 - Every rewritten file must load with the new `Plan`; the tool reports any that do not and
@@ -232,8 +235,79 @@ before `start_acquisition_and_guiding` answers.
   common** at the baseline; only `NewPlanTemplate` still hardcodes 600.
 - `COOLING_DOWN_REASON = "imager: cooling down"` in `models/statuses.py`. The unit builds
   its cooling messages from it; control matches `reason.startswith(COOLING_DOWN_REASON)`.
-- `parse_target` moves from MAST_unit `flux_metering/session.py` to `common/parsers.py`,
-  unchanged.
+- `parse_target` is **already in `common/parsers.py`** at the baseline. MAST_unit still
+  defines its own copy (`flux_metering/session.py:1412`, imported at `unit.py:67`); it
+  switches to common's and deletes the copy.
+
+**Coordinates: decimal and sexagesimal alike, one parser.** Every path that takes RA/Dec --
+`Target`'s validators, `parse_target`, the `RA_PATTERN` / `DEC_PATTERN` query patterns --
+ends in `parse_angle` (`parsers.py:163`), which reads floats, decimal strings and colon- or
+space-separated sexagesimal through astropy's `Angle`, then range-checks without wrapping:
+RA in decimal **hours** `[0, 24)`, Dec in decimal degrees `[-90, 90]`. A plan file may write
+`ra_hours = 12.5125` or `ra_hours = "12:30:45"`. An RA written in degrees (`187.6875`) is
+refused as out of range, not wrapped onto another part of the sky. This is already so at
+the baseline; nothing here changes it, and nothing may bypass it with `float()`.
+
+### 3.8 Targets by name: resolve once, record the result
+
+A target may be given by its coordinates, by its object name (`Target.name`, the existing
+field, shown in the GUI as "Name"), or both. **Precedence, the same as the unit's
+`Acquirer._target_coordinates` (`acquirer.py:570`):**
+
+1. **Both coordinates present and valid**: used as given; the name is a label and is not
+   resolved.
+2. **Otherwise, the name, if there is one**, resolved by `resolve_object_name`
+   (`common/object_resolver.py:539`: TNS and both Sesame mirrors at once, moving targets
+   refused without a network call, a 15 s budget, the answering service recorded).
+   "Otherwise" covers missing **and** unusable: a coordinate that will not convert is not
+   a coordinate.
+3. **Otherwise the target is invalid**, and says which it was: no coordinates and no
+   name; coordinates supplied but unusable and no name; or a name that did not resolve.
+   A name that fails to resolve never falls through to anything.
+
+**`parse_target` gains the name** and stays the one place the rule lives:
+
+```python
+def parse_target(
+    ra_j2000_hours: str | float | None,
+    dec_j2000_degs: str | float | None,
+    object_name: str | None = None,
+    resolve_timeout: float = TOTAL_TIMEOUT_SECONDS,
+) -> tuple[float | None, float | None, ResolvedObject | None]:
+    """(ra, dec, None) when the coordinates were used as given; (ra, dec, resolved) when the
+    name was resolved; raises ValueError (ObjectNameError for a name) otherwise."""
+```
+
+Without a name it behaves as today, so existing callers are unchanged. The unit's
+`_target_coordinates` keeps only its rule 3 -- the mount's current position, which only the
+unit has -- on top of `parse_target`, instead of its own copy of rules 1 and 2.
+
+**Resolution happens once, when a plan is written, never when it is loaded.** Plans are
+loaded constantly -- every folder refresh, every scrape, every GUI listing -- and a
+validator that resolved would put up to 15 s of network on each. So:
+
+- **`Target`'s validator never resolves.** It requires both coordinates, valid, as today.
+  `ra_hours` / `dec_degrees` stay required in the model.
+- **`resolve_target(target: dict) -> tuple[dict, EventModel | None]`** in
+  `models/targets.py` runs on the raw dict before the `Plan` is built: it applies
+  `parse_target` with `target.get("name")`, writes the decimal coordinates into the dict,
+  and returns the `resolved` event when it resolved. Every path that writes a plan calls
+  it: `submit_plan`, `start_acquisition` (7.1) and the rewrite tool (3.5).
+- **The file then carries the coordinates**, so every later load meets rule 1 and never
+  touches the network. The name stays in the file as the label.
+
+**The `resolved` event** records where the coordinates came from, because a misresolution
+is invisible everywhere below it -- the mount slews, guiding locks, and the spectrum is of
+the wrong sky:
+
+```toml
+[[events]]
+what = "resolved"
+details = ["M101 -> ra=14.053500h dec=+54.348750d via simbad@cds", "canonical name: M 101"]
+```
+
+When coordinates were supplied but unusable and the name won, the event says so first:
+`"coordinates unusable (ra='25:00:00', dec='+20:15:00'), resolved the name instead"`.
 
 ## 4. What the current plan path does, and why it is replaced
 
@@ -446,6 +520,7 @@ plan's log even if control dies mid-run.
 | `what` | When | `details` |
 | --- | --- | --- |
 | `generated` | `start_acquisition` wrote the plan (7.1) | the request, coordinates as typed |
+| `resolved` | a name was resolved when the plan was written (3.8) | `<name> -> ra=... dec=... via <service>`, the canonical name |
 | `executing` | the execution started | `run_folder: <path>`, `units: [...]`, `quorum: <n>` |
 | `unit-starting-up` | a worker sent `startup` | `<unit>` |
 | `unit-focusing` | a worker sent `focus_on_star` | `<unit>` |
@@ -534,31 +609,62 @@ All three under the OpenAPI tag `acquisition`, at `Const.BASE_CONTROL_PATH` +:
 
 ### 7.1 `start_acquisition`
 
-Parameters: `units: list[str]` (a `Query`, at least one; unit specifiers, or `units=any`, which becomes `requested_units = "any"`); `ra_j2000_hours`,
-`dec_j2000_degs` (required, the same `Query(pattern=RA_PATTERN / DEC_PATTERN)` as the
-unit's `focus_on_star`); `autofocus_on_star: bool = False`; `quorum: int | None = None`
-(defaults to `len(units)`; required with `units=any`, where the count is not known until the units are resolved).
+Parameters:
 
-1. Build the plan: `target.ra_hours` and `target.dec_degrees` as decimals from
-   `parse_target`, `requested_units`, `autofocus`, `quorum`, `owner = "mast"`, `approved = true`,
-   `production = false`, no `spec_assignment`, and an event
-   `EventModel(what="generated", details=["start_acquisition", "ra=<as typed>",
-   "dec=<as typed>"])`, which keeps the coordinates the operator typed. Validate it as a
-   `Plan`; refuse on any error.
+- `units: list[str]`, a `Query`, at least one: unit specifiers, or `units=any`, which
+  becomes `requested_units = "any"`.
+- `ra_j2000_hours`, `dec_j2000_degs`: optional, the same `Query(pattern=RA_PATTERN /
+  DEC_PATTERN)` as the unit's `focus_on_star`.
+- `object_name: str | None = None`, resolved when the coordinates are not both usable
+  (3.8). At least one of the two -- both coordinates, or a name -- is required.
+- `autofocus_on_star: bool = False`.
+- `quorum: int | None = None`: defaults to `len(units)`; required with `units=any`, where
+  the count is not known until the units are resolved.
+
+1. Build the plan: `resolve_target` (3.8) gives `target.ra_hours` / `target.dec_degrees`
+   as decimals, and `target.name` is the `object_name`; then `requested_units`,
+   `autofocus`, `quorum`, `owner = "mast"`, `approved = true`, `production = false`, no
+   `spec_assignment`, and an event `EventModel(what="generated",
+   details=["start_acquisition", "ra=<as typed>", "dec=<as typed>", "object=<as typed>"])`
+   that keeps what the operator typed, followed by the `resolved` event when a name was
+   resolved. Validate it as a `Plan`; refuse on any error -- including a name that does
+   not resolve (`"could not resolve 'M1O1' -- ..."`).
 2. If an acquisition-only plan is in progress, abort it and wait up to **30 s** for its
    units to clear `Aborting`. If any requested unit is still `Aborting` after that, or is
    `Aborting` for another reason, refuse: `"<unit>: still aborting"`. If a plan **with a
    spectrograph** is in progress, refuse: `"plan <ulid> is in progress"`. A science plan is never
    aborted to make room for an acquisition.
 3. Write the TOML with `plan_to_toml` (3.4) **straight into `in-progress/`** as
-   `PLAN_<ulid>.toml`, a fresh ULID. It
-   bypasses `submitted/` and `pending/`, and so `submit_plan`'s "instrument must be
-   specified" check, which stays for submitted plans.
+   `PLAN_<ulid>.toml`, a fresh ULID. It bypasses `submitted/` and `pending/`: nothing
+   would approve it there.
 4. Load it back with `Plan.from_toml_file`, and hand it to `Controller.execute`. Answer
    with the ULID at once; the execution runs in the background.
 
 A generated plan appears in the plan folders like any other and ends in `completed/`,
 `failed/` or `canceled/` with its events.
+
+**`submit_plan` no longer requires an instrument.** Its check "spec_assignment.instrument
+must be specified" (`planning.py:402`) is removed: a plan without a spectrograph is valid
+wherever it comes from, so a person can write and submit the same plan control generates.
+A submitted plan still goes through `submitted/` and `pending/` and runs only once
+approved. `submit_plan` runs `resolve_target` (3.8) before writing, so a submitted plan
+that names its object is stored with coordinates. The bare minimum a person writes, by
+coordinates or by name:
+
+```toml
+requested_units = ["mast01", "mast03", "mast05"]
+
+[target]
+ra_hours = "12:30:45"
+dec_degrees = "+20:15:00"
+```
+
+```toml
+requested_units = ["mast01", "mast03", "mast05"]
+
+[target]
+name = "M101"
+```
 
 ### 7.2 `acquisition_status`
 
@@ -604,7 +710,17 @@ Aborts the current execution (5.8). No current execution: error `"no acquisition
   with `instrument=None` it is accepted.
 - `AcquisitionOutcome` round-trips through `FullUnitStatus`; a status without
   `acquisition` parses to `None`.
-- `parse_target`: decimal, colon- and space-separated sexagesimal, `None`/`""`, RA of 0.
+- `parse_target`: decimal, colon- and space-separated sexagesimal, `None`/`""`, RA of 0 (already
+  covered in common at the baseline).
+- `Target`: `ra_hours = 12.5125` and `"12:30:45"` load to the same value; an RA of
+  `187.6875` (degrees) and a Dec of `91` are refused.
+- `parse_target` with a name: both coordinates valid -> used, the name not resolved (no
+  network call); one coordinate missing or unusable -> the name resolved; no name -> as
+  today; a name that does not resolve -> `ObjectNameError`, never a fallback. The resolver is
+  stubbed: no network in tests.
+- `resolve_target` writes the coordinates into the dict and returns the `resolved` event;
+  unusable coordinates plus a name give the "coordinates unusable" detail first.
+- `Target` never resolves: a name without coordinates fails validation on load.
 
 **The rewrite tool**: `allocated_units` renamed with its value; an empty `requested_units`
 becomes `"any"`; a quorum above an explicit list is reported and the file untouched;
@@ -648,6 +764,9 @@ timeouts, no network, no sleeps)
 - `plan_to_toml` drops `[target.science]` when empty, keeps `scheduled_units = []`, keeps
   `merit = 1`.
 - `start_acquisition` over an acquisition aborts it; over a spectrograph plan refuses.
+- `submit_plan` accepts a plan with no `spec_assignment`; it lands in `submitted/`.
+- `submit_plan` and `start_acquisition` with only `object_name` store the resolved
+  coordinates and the `resolved` event; an unresolvable name refuses the request.
 - No spectrograph call is made when `spec_assignment` is `None`.
 - The table: columns, `True (cooling)`, `-`/`?`, errors.
 
@@ -657,10 +776,11 @@ Deployment moves by pin bumps in MAST_provisioning `tools/mast-repos.tsv`. `comm
 row, shared by the unit, control and spec roles, so a common bump reaches every machine.
 
 1. **Additive, common + unit together.** common: `AcquisitionOutcome`,
-   `COOLING_DOWN_REASON`, `parse_target`. unit: 6.1-6.5, importing `parse_target` from
-   common. Nothing in common's plan model changes yet, so control and spec are unaffected.
+   `COOLING_DOWN_REASON`, `parse_target`'s `object_name` (3.8). unit: 6.1-6.5, its own
+   `parse_target` replaced by common's, and `_target_coordinates` built on it.
+   Nothing in common's plan model changes yet, so control and spec are unaffected.
    Removing `execute_assignment` is safe: control's plan path cannot reach it (4.1 #1).
-2. **The model and the engine, together, on control.** common: 3.1-3.4. control: the
+2. **The model and the engine, together, on control.** common: 3.1-3.4, `resolve_target`. control: the
    engine, the endpoints, `NewPlanTemplate`. gui: the plan forms (the moved exposure
    fields, no `required_units`, `"any"` as a unit choice), the unit filter on
    `requested_units`, and `ScrapingResults.known_units`. Run the rewrite tool (3.5) on mast-ns-control before
