@@ -18,6 +18,12 @@ hardware findings — belongs in that repo's own `CLAUDE.md` / `docs/`, next to 
 code it describes. It versions with the code, travels with it, and is found by
 whoever works there.
 
+**Operational how-tos go in the [MAST wiki](https://github.com/The-MAST-project/MAST/wiki)**:
+reaching systems, running a unit, observing, calibrating, provisioning, deploying and
+recovering. The repo keeps a one-line pointer to the page, and the page's `triggers` block
+names the code it describes. A change to that code updates the page in the same piece of
+work; see `memory/feedback_wiki_how_tos.md` and `/wiki-sweep`. The wiki is public.
+
 **Put it here only if it is genuinely cross-cutting** — it applies in (almost)
 every MAST repo regardless of which one you are in. Examples:
 - team working-style preferences (how we want the assistant to behave),
@@ -33,7 +39,7 @@ truly global items (proxy, working-style) stayed.
 
 ## Layout
 
-- `skills/` — reusable Claude Code skills (`/wip-commit`, `/wip-status`, `/sync-units`)
+- `skills/` — reusable Claude Code skills (`/wip-commit`, `/wip-status`, `/sync-units`, `/wiki-sweep`)
 - `memory/` — shared, cross-cutting memories only (working-style, project-wide facts)
 - `plans/` — design notes that span repos or predate their home repo
 - `code-validation-and-ci-guidelines.md` — linting, testing and CI standards for every
