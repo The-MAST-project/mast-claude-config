@@ -4,7 +4,7 @@ Shared Claude Code skills and project memories for the MAST development team.
 
 ## Contents
 
-- `skills/` — reusable Claude Code skills (`/wip-commit`, `/wip-status`, `/sync-units`)
+- `skills/` — reusable Claude Code skills (`/wip-commit`, `/wip-status`, `/sync-units`, `/wiki-sweep`)
 - `memory/` — shared project memories (feedback preferences, project context, conventions)
 - `code-validation-and-ci-guidelines.md` — linting, testing and CI standards for every MAST repo
 
