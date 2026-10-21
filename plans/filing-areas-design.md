@@ -61,7 +61,8 @@ risks filling it during a long outage.
 ### 1.4 Path spellings disagree
 
 Roots are stored forward-slashed (`D:/MAST/`); `PathMaker` returns `str(Path(...))`, which
-is backslashed on Windows. Every prefix test or `.replace` between them silently does
+is backslashed on Windows. (Fixed at the source by making every path handed out
+forward-slashed, §4.1.) Every prefix test or `.replace` between them silently does
 nothing unless the caller converts first:
 
 - [acquisition.py:128](../../unit/src/acquisition.py#L128) — `self.folder.replace(ram.root,
@@ -160,6 +161,19 @@ slashes, exactly one trailing slash. **No `realpath`**: it touches the file syst
 redirector would hang `Filer()`, and `common.utils` builds one at import), it drops the
 trailing slash the prefix tests rely on, and its answer for `Z:` depends on whether the
 share is up (§2). Comparisons against a root are case-insensitive on Windows.
+
+**One spelling for every path handed out (decided 2026-10-21).** Everything `Filer` and
+`PathMaker` return is forward-slashed — roots, and every folder or file path built under
+them — through one helper, `common.paths.as_posix`. Windows accepts either separator in
+every file API in use (Win32 `CreateFile`, and so astropy, `shutil` and the camera SDKs;
+PHD2's `save_image` already receives `D:/MAST/...`); astrometry.net's cygwin wrapper is
+better off, since it rewrites only the `D:` prefix. The rule is for what is **returned**:
+`realpath`, `abspath` and a native `os.path.join` spell paths natively on Windows, so a
+caller that runs a path through them converts it back before handing it on, and `Filer`'s
+internal registries stay keyed on `realpath`. It does not license string comparison:
+case-insensitivity and "the leading root only" still need `to_top` (§3, item 3). The
+`\\?\` long-path prefix, which only takes backslashes, is not used (§9). `PathMaker`'s half
+landed as MAST_common#182.
 
 ### 4.2 Live checks
 
