@@ -207,7 +207,7 @@ STARTING → WAITING_FOR_RESOURCES → LOADING_CONFIG → SUPERVISING → LAUNCH
 | resource | probe | "available" means |
 |---|---|---|
 | network | `gethostbyname(controller_host.domain)`, then `create_connection((fqdn, mongo_port), 2s)` | both succeed |
-| RAM disk + indexes | `is_windows_drive_mapped("D:")` → `is_accessible(index_dir, 2.0)` → every `index-5206-{00..46}.fits` present **and non-empty** | drive mapped, dir present; missing indexes are **amber, not fatal** |
+| RAM disk + indexes (unit only) | `is_windows_drive_mapped("D:")` → `is_accessible(index_dir, 2.0)` → the folder equal, by name and size, to provisioning's `C:\MAST\state\mast-indexes.json` (MAST_provisioning#254; no file, as on mast00 and mastw: not checked) | drive mapped, dir present; a differing index set is **amber, not fatal** |
 | mast-share | `Filer().ensure_shared_root()` ([filer.py:143-181](../../common/filer.py#L143)) | it returns True |
 
 Reuse the existing probes; do not write new ones. `is_accessible`
@@ -671,8 +671,8 @@ to `UnitConfig` and `SpecsConfig`. **Every field defaulted** — `get_unit()` me
 unit in the fleet at once.
 
 Sections: `processes: dict[str, ManagedProcessConfig]` (enabled, exe, args, port, intervals,
-thresholds, crash-loop window), `resources` (wait budget, probe intervals, `index_dir`,
-`index_series`, `index_count`), `app` (package_dir, entry, grace, restart), `vscode` (exe,
+thresholds, crash-loop window), `resources` (wait budget, probe intervals, `index_dir`; `index_series` and `index_count`
+are unread since MAST_supervision#21: the set is provisioning's manifest), `app` (package_dir, entry, grace, restart), `vscode` (exe,
 workspace), `gui` (buffer sizes, drain interval, level), `heartbeat_interval_seconds` (300),
 `stop_grace_seconds`. Observe
 `common/CLAUDE.md:216` — one `json_schema_extra` entry per line, tooltips never wrapped.
