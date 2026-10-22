@@ -331,8 +331,12 @@ the same name would be a collision on every sweep.
 ## 8. The supervisor
 
 - **Revives the RAM disk** when it disappears, since a scheduled task is not restarted by
-  Windows: by running the task itself (`schtasks /run /tn "\ImDisk Persistent Drive"`),
-  so the image is named in one place. The image brings the indexes back with it (§1.3).
+  Windows: by running the SYSTEM task `\mast-ramdisk-restart`, which force-detaches `D:` and
+  runs the boot task, so the image is named in one place. The image brings the indexes back
+  with it (§1.3). The supervisor runs unelevated, and on mast00 (2026-10-18) UAC is on and the
+  boot task's ACL gives `mast` only `FR`, so it can neither detach a disk nor run the boot task
+  itself; provisioning's imdisk provider registers the restart task, with run access for
+  interactive users (amended 2026-10-22).
   *Changes supervisor-design §14*, which says the supervisor "does not mount the ImDisk …
   only checks and reports" (decided 2026-10-14).
 - **Does not tell the unit.** The unit's monitor finds the revived disk within a minute
@@ -365,20 +369,27 @@ demoted at once regardless (§5), and the write is retried on the fallback.
 1. **Treats the request as a hint and checks for itself**, with the same writable probe
    (§4.2). If `D:` is writable it answers `409` with "D: is healthy" and does nothing — a
    client with a mistaken view cannot wipe a working disk.
-2. **Detaches** (`imdisk -D -m D:`, forced — the task itself is not running: `imdisk -a`
-   mounts and exits, so `schtasks /end` would stop nothing) and **runs the task** (`schtasks /run /tn
-   "\ImDisk Persistent Drive"`), so the image is still named only in the task (§1.3).
+2. **Runs the restart task** (`schtasks /run /tn \mast-ramdisk-restart`). As SYSTEM, it
+   **detaches** (`imdisk -D -m D:`, forced — the boot task itself is not running: `imdisk -a`
+   mounts and exits, so `schtasks /end` would stop nothing) and **runs the boot task**, so the
+   image is still named only in that task (§1.3). The revival is done when `D:` takes a write
+   again with its index folder present: `schtasks /run` returns before the task has detached
+   the old disk, and a read-only `D:` passes a readiness check (seen on the dev VM, 2026-10-22).
+   Missing indexes do not hold it up; another restart cannot change what the image holds.
 3. **One restart at a time.** Requests arriving during a restart — from the unit's
    `Filer`, a solver, or the spec's — join the one in progress and get its outcome.
-4. **Backoff, and a limit.** Loading 15 GB into memory takes a while; a disk that dies
-   again at once must not loop. After three failed or short-lived revivals within an hour
-   the supervisor stops trying, raises it in its status, and leaves the units on their
-   fallbacks.
+4. **A limit.** Loading 15 GB into memory takes a while; a disk that dies again at once
+   must not loop. After three failed or short-lived (lost again within five minutes)
+   revivals within an hour the supervisor stops trying, raises it in its status, and leaves
+   the units on their fallbacks. There is no delay between attempts beyond the probe
+   interval; each revival waits out its own budget (five minutes) before it counts as failed.
 5. **Also watches on its own.** It already checks the RAM disk as a resource (§8), so it
    revives without being asked; a client's request only shortens the wait.
 
 **Responses:** `202` with the restart's state while it runs, `200` "restored" once `D:` is
-writable again, `409` "healthy", `503` "giving up" once the limit is reached.
+writable again — and for five minutes after, so a client that got `202` and asks again hears
+the outcome — `409` "healthy", `503` "giving up" once the limit is reached, and `503`
+"failed" for a single revival that did not bring `D:` back.
 
 **The client's side.** A `SupervisorApi` in `common/api.py`, beside the other `BaseApi`
 clients, so the spec's `Filer` behaves the same way. On "restored", `Filer` calls
@@ -388,8 +399,9 @@ fallback, and the one-minute check finds the disk whenever it returns.
 
 **Localhost only.** The endpoint wipes a disk, so the supervisor binds it to `127.0.0.1`;
 nothing off the machine can call it. MAST_supervision's `api.py` already states this rule
-for any action route; it needs its own listener beside the `0.0.0.0` status server.
-Tracked as MAST_supervision#18.
+for any action route; it has its own listener, `127.0.0.1:SUPERVISOR_ACTIONS_PORT` (8005),
+beside the `0.0.0.0` status server. Both listeners are claimed alike and both are required
+(supervisor-design §7). Tracked as MAST_supervision#18.
 - **Its resource wait probes the share by UNC**, replacing the `Z:` check, and keeps the
   RAM-disk check (supervisor-design §5, the `RAM disk + indexes` row).
 - **Reports the event** in its status: "RAM disk lost 02:14, restored 02:15", so a gap in
