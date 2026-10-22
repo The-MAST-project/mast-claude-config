@@ -388,8 +388,9 @@ demoted at once regardless (§5), and the write is retried on the fallback.
 
 **Responses:** `202` with the restart's state while it runs, `200` "restored" once `D:` is
 writable again — and for five minutes after, so a client that got `202` and asks again hears
-the outcome — `409` "healthy", `503` "giving up" once the limit is reached, and `503`
-"failed" for a single revival that did not bring `D:` back.
+the outcome — `409` "healthy", `503` "giving up" once the limit is reached, and `502`
+"failed" for a single revival that did not bring `D:` back (amended 2026-10-22: one status
+for both read as giving up on the client).
 
 **The client's side.** A `SupervisorApi` in `common/api.py`, beside the other `BaseApi`
 clients, so the spec's `Filer` behaves the same way. On "restored", `Filer` calls
