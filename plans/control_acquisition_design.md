@@ -44,6 +44,10 @@ Where the implementation departs from the sections below:
   guiding unit drops out when its guider is no longer engaged (a lost star still being sought,
   PHD2 `LostLock`, does not count) or it is unreachable for 30 s; the exposure is then aborted
   with the plan and every unit stopped.
+- **`spec_assignment` is `spec`** (decided 2026-10-25): `[spec]` in plan files, `Plan.spec` in
+  code. The sections below keep the old name. The rewrite tool renames it in existing files.
+- **A plan with no spectrograph `instrument` only acquires**, whether `[spec]` is left out or
+  written without one.
 - **Every unit producer writes a `plan_id` file** (and the spectrograph a `batch_id` file for a
   batch) into each products folder it creates (5.10).
 
