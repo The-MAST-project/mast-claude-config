@@ -296,22 +296,26 @@ field, shown in the GUI as "Name"), or both. **Precedence, the same as the unit'
    name; coordinates supplied but unusable and no name; or a name that did not resolve.
    A name that fails to resolve never falls through to anything.
 
-**`parse_target` gains the name** and stays the one place the rule lives:
+**`target_coordinates`** (`common/parsers.py`, beside `parse_target`) is the one place the
+rule lives:
 
 ```python
-def parse_target(
+def target_coordinates(
     ra_j2000_hours: str | float | None,
     dec_j2000_degs: str | float | None,
     object_name: str | None = None,
-    resolve_timeout: float = TOTAL_TIMEOUT_SECONDS,
+    resolve_timeout: float | None = None,     # TOTAL_TIMEOUT_SECONDS
 ) -> tuple[float | None, float | None, ResolvedObject | None]:
     """(ra, dec, None) when the coordinates were used as given; (ra, dec, resolved) when the
-    name was resolved; raises ValueError (ObjectNameError for a name) otherwise."""
+    name was resolved; (None, None, None) when nothing was given; ObjectNameError for a
+    name that did not resolve, ValueError for coordinates given but unusable."""
 ```
 
-Without a name it behaves as today, so existing callers are unchanged. The unit's
-`_target_coordinates` keeps only its rule 3 -- the mount's current position, which only the
-unit has -- on top of `parse_target`, instead of its own copy of rules 1 and 2.
+`parse_target` is unchanged: it converts whatever it is given, and its callers unpack two
+values. (This section first had `parse_target` itself gain the name; MAST_common#202 put the
+rule beside it instead.) The unit's `_target_coordinates` keeps only its rule 3 -- the
+mount's current position, which only the unit has -- on top of `target_coordinates`
+(MAST_unit#365), instead of its own copy of rules 1 and 2.
 
 **Resolution happens once, when a plan is written, never when it is loaded.** Plans are
 loaded constantly -- every folder refresh, every scrape, every GUI listing -- and a
@@ -321,7 +325,7 @@ validator that resolved would put up to 15 s of network on each. So:
   `ra_hours` / `dec_degrees` stay required in the model.
 - **`resolve_target(target: dict) -> tuple[dict, EventModel | None]`** in
   `models/targets.py` runs on the raw dict before the `Plan` is built: it applies
-  `parse_target` with `target.get("name")`, writes the decimal coordinates into the dict,
+  `target_coordinates` with `target.get("name")`, writes the decimal coordinates into the dict,
   and returns the `resolved` event when it resolved. Every path that writes a plan calls
   it: `submit_plan`, `start_acquisition` (7.1) and the rewrite tool (3.5).
 - **The file then carries the coordinates**, so every later load meets rule 1 and never
@@ -596,6 +600,18 @@ plans/products/PLAN_01JAD8Q4ZK7V3M2XG9T6R5N0HB/2026-10-19_19-42-07/
 The producer is the unit's name, or the instrument's for `Spec`. The link is named after its
 target, so a stage that runs twice for one producer gives two links, not a collision.
 
+**Every product folder says its plan.** A producer given a plan's ULID -- the unit's
+`focus_on_star` and `start_acquisition_and_guiding`, the spectrograph's assignment -- writes a
+file named `plan_id`, holding the ULID, into each products folder it creates, as soon as it
+creates it. Written under `protect`, so it is a product: it goes to the share with the rest
+and is never discarded as scratch. The folder then names its plan wherever it is found,
+without control's links -- on the share, on a fallback, or left on a RAM disk. One helper,
+`write_plan_id_file(folder, plan_ulid)` in `models/plans.py` (MAST_common#202), beside
+`PLAN_ID_FILE = "plan_id"`. A batch's folders are labelled the same way, in a file of their
+own: `batch_id`, with the batch's ULID (`write_batch_id_file`, `BATCH_ID_FILE`). The
+spectrograph writes `plan_id` for an assignment carrying a plan and `batch_id` for one
+carrying a batch.
+
 **Who links.** Control. The units and the spectrograph are Windows machines that reach the
 share over SMB, where they cannot create symlinks; control runs on the machine that serves
 it. A producer sends an `AssignmentNotification` when it **creates** its folder, carrying the
@@ -697,11 +713,11 @@ control can link them into the execution's products folder (5.10). It moves to t
 endpoints the workers call:
 
 - `start_acquisition_and_guiding` and `focus_on_star` take an optional `plan_ulid: str |
-  None = None`. When it is set, the unit sends the `in-progress` notification as soon as it
-  has created its folder: `stage=PlanStage.Acquisition` with the acquisition folder, or
+  None = None`. When it is set, as soon as the unit has created its folder it writes the
+  `plan_id` file there (5.10) and sends the `in-progress` notification: `stage=PlanStage.Acquisition` with the acquisition folder, or
   `stage=PlanStage.Autofocus` with the focus_on_star run folder, in `shared_top` relative to
   its folder on the share, as today.
-- An operator calling them by hand passes no `plan_ulid` and nothing is sent.
+- An operator calling them by hand passes no `plan_ulid`, and nothing is written or sent.
 
 **`AssignmentNotification.stage: PlanStage | None = None`** is added in MAST_common. The
 spectrograph does not need to change: a notification without `stage` is placed by its
@@ -831,7 +847,7 @@ Aborts the current execution (5.8). No current execution: error `"no acquisition
   covered in common at the baseline).
 - `Target`: `ra_hours = 12.5125` and `"12:30:45"` load to the same value; an RA of
   `187.6875` (degrees) and a Dec of `91` are refused.
-- `parse_target` with a name: both coordinates valid -> used, the name not resolved (no
+- `target_coordinates`: both coordinates valid -> used, the name not resolved (no
   network call); one coordinate missing or unusable -> the name resolved; no name -> as
   today; a name that does not resolve -> `ObjectNameError`, never a fallback. The resolver is
   stubbed: no network in tests.
@@ -856,8 +872,8 @@ of them reported and untouched; `--dry-run` writes nothing; every output loads.
 - Idleness reads `is_engaged`: a unit in `LostLock` is not idle.
 - Stop/abort reads `is_engaged`: a unit in `LostLock` is told to stop.
 - A refused `start_guiding` ends `FAILED` with the guider's errors.
-- `plan_ulid` sends the notification, with its stage, once the folder exists; no `plan_ulid`
-  sends none.
+- `plan_ulid` writes `plan_id` into the folder and sends the notification, with its stage,
+  once the folder exists; no `plan_ulid` does neither.
 
 **MAST_control** (a fake `UnitApi` scripted per unit, injectable poll interval and
 timeouts, no network, no sleeps)
@@ -901,8 +917,8 @@ Deployment moves by pin bumps in MAST_provisioning `tools/mast-repos.tsv`. `comm
 row, shared by the unit, control and spec roles, so a common bump reaches every machine.
 
 1. **Additive, common + unit together.** common: `AcquisitionOutcome`,
-   `COOLING_DOWN_REASON`, `parse_target`'s `object_name` (3.8). unit: 6.1-6.5, its own
-   `parse_target` replaced by common's, and `_target_coordinates` built on it. common also
+   `COOLING_DOWN_REASON`, `target_coordinates` (3.8). unit: 6.1-6.5, and
+   `_target_coordinates` built on `target_coordinates`. common also
    gets `PlanStage` and `AssignmentNotification.stage` here, additive, for 6.5; `PlanProducts`
    waits for step 2.
    Nothing in common's plan model changes yet, so control and spec are unaffected.
