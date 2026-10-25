@@ -47,7 +47,7 @@ spectrograph.
   `production = false` (an engineering acquisition, not science). Appendix A shows one.
 - **Every unit's transitions are events in the plan file**, not only the plan's outcome,
   so the file says which units made the quorum and why the others did not.
-- **Every execution gets a products folder**, `plans/products/PLAN_<ulid>/<YYYY-MM-DD_HH-MM>/`
+- **Every execution gets a products folder**, `plans/products/PLAN_<ulid>/<YYYY-MM-DD_HH-MM-SS>/`
   on the share, with a folder per stage (`Autofocus/`, `Acquisition/`, `Spec/`). Producers keep
   writing their own sequence-numbered folders; they tell control where, and control links them
   in (5.10). It replaces the run folder.
@@ -579,15 +579,15 @@ disk to the share as today.
   in its own `products/`. Not a `Plans/` beside `plans/`: those are two folders on control,
   but one for the units and the GUI host, which see the share through Samba, case-blind;
 - `PLAN_<ulid>`, the stem of the plan's file;
-- `<execution>` is the UTC start, `YYYY-MM-DD_HH-MM` (no colons: Windows clients read this
+- `<execution>` is the UTC start, `YYYY-MM-DD_HH-MM-SS` (no colons: Windows clients read this
   folder too). A revived plan runs again under the same ULID, and each run gets its own
-  folder. Two starts in one minute: the second gets `_2`.
+  folder. Two starts in the same second: the second gets `_2`.
 
 **Layout.** A folder per stage, a folder per producer, and one link per product folder,
 named after it (targets shown from the share root):
 
 ```text
-plans/products/PLAN_01JAD8Q4ZK7V3M2XG9T6R5N0HB/2026-10-19_19-42/
+plans/products/PLAN_01JAD8Q4ZK7V3M2XG9T6R5N0HB/2026-10-19_19-42-07/
   Autofocus/mast01/0003                        -> mast01/2026-10-19/FocusOnStar/0003
   Acquisition/mast01/seq=0007,time=19-45-02... -> mast01/2026-10-19/Acquisitions/seq=0007,...
   Spec/highspec/acquisition-0003               -> mast-ns-spec/2026-10-19/highspec/acquisition-0003
@@ -623,7 +623,7 @@ class PlanStage(StrEnum):
 @dataclass(frozen=True)
 class PlanProducts:
     plan_ulid: str
-    execution: str                                   # "2026-10-19_19-42"
+    execution: str                                   # "2026-10-19_19-42-07"
 
     @classmethod
     def start(cls, plan_ulid: str, now: datetime) -> "PlanProducts":
@@ -835,8 +835,8 @@ Aborts the current execution (5.8). No current execution: error `"no acquisition
   network call); one coordinate missing or unusable -> the name resolved; no name -> as
   today; a name that does not resolve -> `ObjectNameError`, never a fallback. The resolver is
   stubbed: no network in tests.
-- `PlanProducts.start`: the folder is `plans/products/PLAN_<ulid>/<YYYY-MM-DD_HH-MM>`, and a
-  second start in the same minute gets `_2`; `link` makes a relative link named after its
+- `PlanProducts.start`: the folder is `plans/products/PLAN_<ulid>/<YYYY-MM-DD_HH-MM-SS>`, and a
+  second start in the same second gets `_2`; `link` makes a relative link named after its
   target, resolving from the share root, and a second call is a no-op; a target that does not
   exist yet still gets its link. On a temporary share root.
 - `AssignmentNotification` without `stage` still parses.
@@ -985,7 +985,7 @@ when = "2026-10-19T19:42:07.311204+00:00"
 
 [[events]]
 what = "executing"
-details = ["products: /Storage/mast-share/MAST/plans/products/PLAN_01JAD8Q4ZK7V3M2XG9T6R5N0HB/2026-10-19_19-42", "units: mast01, mast03, mast05", "quorum: 2"]
+details = ["products: /Storage/mast-share/MAST/plans/products/PLAN_01JAD8Q4ZK7V3M2XG9T6R5N0HB/2026-10-19_19-42-07", "units: mast01, mast03, mast05", "quorum: 2"]
 when = "2026-10-19T19:42:07.402113+00:00"
 
 [[events]]
@@ -1030,6 +1030,6 @@ when = "2026-10-19T19:48:30.561337+00:00"
 ```
 
 The products are linked into
-`plans/products/PLAN_01JAD8Q4ZK7V3M2XG9T6R5N0HB/2026-10-19_19-42/` as the units report them:
+`plans/products/PLAN_01JAD8Q4ZK7V3M2XG9T6R5N0HB/2026-10-19_19-42-07/` as the units report them:
 `Autofocus/mast01/<run>`, `Acquisition/mast01/seq=...`, and the same for mast03. mast05
 produced nothing, so it has no folder.
