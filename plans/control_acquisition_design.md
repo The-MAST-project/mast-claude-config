@@ -296,22 +296,26 @@ field, shown in the GUI as "Name"), or both. **Precedence, the same as the unit'
    name; coordinates supplied but unusable and no name; or a name that did not resolve.
    A name that fails to resolve never falls through to anything.
 
-**`parse_target` gains the name** and stays the one place the rule lives:
+**`target_coordinates`** (`common/parsers.py`, beside `parse_target`) is the one place the
+rule lives:
 
 ```python
-def parse_target(
+def target_coordinates(
     ra_j2000_hours: str | float | None,
     dec_j2000_degs: str | float | None,
     object_name: str | None = None,
-    resolve_timeout: float = TOTAL_TIMEOUT_SECONDS,
+    resolve_timeout: float | None = None,     # TOTAL_TIMEOUT_SECONDS
 ) -> tuple[float | None, float | None, ResolvedObject | None]:
     """(ra, dec, None) when the coordinates were used as given; (ra, dec, resolved) when the
-    name was resolved; raises ValueError (ObjectNameError for a name) otherwise."""
+    name was resolved; (None, None, None) when nothing was given; ObjectNameError for a
+    name that did not resolve, ValueError for coordinates given but unusable."""
 ```
 
-Without a name it behaves as today, so existing callers are unchanged. The unit's
-`_target_coordinates` keeps only its rule 3 -- the mount's current position, which only the
-unit has -- on top of `parse_target`, instead of its own copy of rules 1 and 2.
+`parse_target` is unchanged: it converts whatever it is given, and its callers unpack two
+values. (This section first had `parse_target` itself gain the name; MAST_common#202 put the
+rule beside it instead.) The unit's `_target_coordinates` keeps only its rule 3 -- the
+mount's current position, which only the unit has -- on top of `target_coordinates`
+(MAST_unit#365), instead of its own copy of rules 1 and 2.
 
 **Resolution happens once, when a plan is written, never when it is loaded.** Plans are
 loaded constantly -- every folder refresh, every scrape, every GUI listing -- and a
@@ -321,7 +325,7 @@ validator that resolved would put up to 15 s of network on each. So:
   `ra_hours` / `dec_degrees` stay required in the model.
 - **`resolve_target(target: dict) -> tuple[dict, EventModel | None]`** in
   `models/targets.py` runs on the raw dict before the `Plan` is built: it applies
-  `parse_target` with `target.get("name")`, writes the decimal coordinates into the dict,
+  `target_coordinates` with `target.get("name")`, writes the decimal coordinates into the dict,
   and returns the `resolved` event when it resolved. Every path that writes a plan calls
   it: `submit_plan`, `start_acquisition` (7.1) and the rewrite tool (3.5).
 - **The file then carries the coordinates**, so every later load meets rule 1 and never
@@ -831,7 +835,7 @@ Aborts the current execution (5.8). No current execution: error `"no acquisition
   covered in common at the baseline).
 - `Target`: `ra_hours = 12.5125` and `"12:30:45"` load to the same value; an RA of
   `187.6875` (degrees) and a Dec of `91` are refused.
-- `parse_target` with a name: both coordinates valid -> used, the name not resolved (no
+- `target_coordinates`: both coordinates valid -> used, the name not resolved (no
   network call); one coordinate missing or unusable -> the name resolved; no name -> as
   today; a name that does not resolve -> `ObjectNameError`, never a fallback. The resolver is
   stubbed: no network in tests.
@@ -901,8 +905,8 @@ Deployment moves by pin bumps in MAST_provisioning `tools/mast-repos.tsv`. `comm
 row, shared by the unit, control and spec roles, so a common bump reaches every machine.
 
 1. **Additive, common + unit together.** common: `AcquisitionOutcome`,
-   `COOLING_DOWN_REASON`, `parse_target`'s `object_name` (3.8). unit: 6.1-6.5, its own
-   `parse_target` replaced by common's, and `_target_coordinates` built on it. common also
+   `COOLING_DOWN_REASON`, `target_coordinates` (3.8). unit: 6.1-6.5, and
+   `_target_coordinates` built on `target_coordinates`. common also
    gets `PlanStage` and `AssignmentNotification.stage` here, additive, for 6.5; `PlanProducts`
    waits for step 2.
    Nothing in common's plan model changes yet, so control and spec are unaffected.
