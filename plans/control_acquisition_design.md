@@ -607,8 +607,10 @@ creates it. Written under `protect`, so it is a product: it goes to the share wi
 and is never discarded as scratch. The folder then names its plan wherever it is found,
 without control's links -- on the share, on a fallback, or left on a RAM disk. One helper,
 `write_plan_id_file(folder, plan_ulid)` in `models/plans.py` (MAST_common#202), beside
-`PLAN_ID_FILE = "plan_id"`. The spectrograph writes it only for an assignment carrying a plan:
-a batch's ULID is not a plan's.
+`PLAN_ID_FILE = "plan_id"`. A batch's folders are labelled the same way, in a file of their
+own: `batch_id`, with the batch's ULID (`write_batch_id_file`, `BATCH_ID_FILE`). The
+spectrograph writes `plan_id` for an assignment carrying a plan and `batch_id` for one
+carrying a batch.
 
 **Who links.** Control. The units and the spectrograph are Windows machines that reach the
 share over SMB, where they cannot create symlinks; control runs on the machine that serves
