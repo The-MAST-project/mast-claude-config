@@ -7,16 +7,38 @@
 > engine**, which replaces the stepped `probe -> dispatch -> wait_for_guiding` phases with
 > one worker thread per unit and a quorum.
 >
-> **Status: step 1 of the rollout (9) under way.** MAST_common#171 is merged; MAST_unit#346
-> (6.1-6.4) is open; 6.5 is MAST_unit#361. Nothing on control yet. Reworked on 2026-10-19
-> around the generated plan; the 2026-10-18 version designed a separate acquisition path.
-> 2026-10-25: products go to a per-execution folder under `plans/products/` (5.10), replacing
-> the run folder. No questions are open.
+> **Status: step 1 done; step 2 in review.** Step 1: MAST_common#171, #202; MAST_unit#346,
+> #365; MAST_spec#123. Step 2: MAST_common#203, MAST_control#47, MAST_gui#31, landing together.
+> Reworked on 2026-10-19 around the generated plan; the 2026-10-18 version designed a separate
+> acquisition path. 2026-10-25: products go to a per-execution folder under `plans/products/`
+> (5.10), replacing the run folder. Where the code departs from this text, "As built" below
+> says so. No questions are open.
 > Code baseline: MAST_common `master` @ `df2669f`, MAST_unit `main` @ `9fc7be6`,
 > MAST_control `master` @ `abbfe8d`.
 >
 > **Prerequisite, done:** MAST_common#170. `UnitApi` is one instance per unit name (or
 > `ipaddr`), not a process-wide singleton, and the per-unit workers depend on that.
+
+## As built (2026-10-25)
+
+Where the implementation departs from the sections below:
+
+- **`target_coordinates` beside `parse_target`** (3.8), not `parse_target` taking the name:
+  its callers unpack two values. MAST_common#202.
+- **`parse_units` is not used** (3.1). It reads a `Site.valid_ids` that does not exist, so it
+  raises on any call; `parsers.expand_units` expands specifiers to hostnames, unfiltered.
+  `requested_units` is validated by syntax alone on load, so a plan loads without the
+  configuration.
+- **`submit_plan` takes the raw body** (7.1): as a `Plan`, a target given by name alone would
+  be refused for its missing coordinates before it could be resolved.
+- **`Plan.add_event(event, toml_path)`** writes where the execution says the file is.
+- **`Controller.start_execution`** replaces `execute`, and is synchronous: it starts the
+  execution on its own thread, so `start_acquisition` answers at once with the ULID.
+- **`workloads.py` goes** with `Batch`'s execution (5.1).
+- **The rewrite tool** also drops the run-time keys the old model wrote (`run_folder`,
+  `timings`, ...).
+- **Every unit producer writes a `plan_id` file** (and the spectrograph a `batch_id` file for a
+  batch) into each products folder it creates (5.10).
 
 ## 1. Why
 
