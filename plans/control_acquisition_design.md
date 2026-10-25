@@ -600,6 +600,16 @@ plans/products/PLAN_01JAD8Q4ZK7V3M2XG9T6R5N0HB/2026-10-19_19-42-07/
 The producer is the unit's name, or the instrument's for `Spec`. The link is named after its
 target, so a stage that runs twice for one producer gives two links, not a collision.
 
+**Every product folder says its plan.** A producer given a plan's ULID -- the unit's
+`focus_on_star` and `start_acquisition_and_guiding`, the spectrograph's assignment -- writes a
+file named `plan_id`, holding the ULID, into each products folder it creates, as soon as it
+creates it. Written under `protect`, so it is a product: it goes to the share with the rest
+and is never discarded as scratch. The folder then names its plan wherever it is found,
+without control's links -- on the share, on a fallback, or left on a RAM disk. One helper,
+`write_plan_id_file(folder, plan_ulid)` in `models/plans.py` (MAST_common#202), beside
+`PLAN_ID_FILE = "plan_id"`. The spectrograph writes it only for an assignment carrying a plan:
+a batch's ULID is not a plan's.
+
 **Who links.** Control. The units and the spectrograph are Windows machines that reach the
 share over SMB, where they cannot create symlinks; control runs on the machine that serves
 it. A producer sends an `AssignmentNotification` when it **creates** its folder, carrying the
@@ -701,11 +711,11 @@ control can link them into the execution's products folder (5.10). It moves to t
 endpoints the workers call:
 
 - `start_acquisition_and_guiding` and `focus_on_star` take an optional `plan_ulid: str |
-  None = None`. When it is set, the unit sends the `in-progress` notification as soon as it
-  has created its folder: `stage=PlanStage.Acquisition` with the acquisition folder, or
+  None = None`. When it is set, as soon as the unit has created its folder it writes the
+  `plan_id` file there (5.10) and sends the `in-progress` notification: `stage=PlanStage.Acquisition` with the acquisition folder, or
   `stage=PlanStage.Autofocus` with the focus_on_star run folder, in `shared_top` relative to
   its folder on the share, as today.
-- An operator calling them by hand passes no `plan_ulid` and nothing is sent.
+- An operator calling them by hand passes no `plan_ulid`, and nothing is written or sent.
 
 **`AssignmentNotification.stage: PlanStage | None = None`** is added in MAST_common. The
 spectrograph does not need to change: a notification without `stage` is placed by its
@@ -860,8 +870,8 @@ of them reported and untouched; `--dry-run` writes nothing; every output loads.
 - Idleness reads `is_engaged`: a unit in `LostLock` is not idle.
 - Stop/abort reads `is_engaged`: a unit in `LostLock` is told to stop.
 - A refused `start_guiding` ends `FAILED` with the guider's errors.
-- `plan_ulid` sends the notification, with its stage, once the folder exists; no `plan_ulid`
-  sends none.
+- `plan_ulid` writes `plan_id` into the folder and sends the notification, with its stage,
+  once the folder exists; no `plan_ulid` does neither.
 
 **MAST_control** (a fake `UnitApi` scripted per unit, injectable poll interval and
 timeouts, no network, no sleeps)
