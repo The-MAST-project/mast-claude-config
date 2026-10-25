@@ -37,6 +37,13 @@ Where the implementation departs from the sections below:
 - **`workloads.py` goes** with `Batch`'s execution (5.1).
 - **The rewrite tool** also drops the run-time keys the old model wrote (`run_folder`,
   `timings`, ...).
+- **`quorum` is the fewest units a plan needs to continue** (decided 2026-10-25). It does not
+  start with fewer eligible units (5.6); it succeeds once that many are guiding (5.5); and it
+  is aborted as soon as fewer remain -- failing on their way to guiding, **or dropping out of
+  guiding during the spectrograph's exposure**, which 5.7 and 10 had left out of scope. A
+  guiding unit drops out when its guider is no longer engaged (a lost star still being sought,
+  PHD2 `LostLock`, does not count) or it is unreachable for 30 s; the exposure is then aborted
+  with the plan and every unit stopped.
 - **Every unit producer writes a `plan_id` file** (and the spectrograph a `batch_id` file for a
   batch) into each products folder it creates (5.10).
 
