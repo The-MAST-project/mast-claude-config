@@ -7,16 +7,53 @@
 > engine**, which replaces the stepped `probe -> dispatch -> wait_for_guiding` phases with
 > one worker thread per unit and a quorum.
 >
-> **Status: step 1 of the rollout (9) under way.** MAST_common#171 is merged; MAST_unit#346
-> (6.1-6.4) is open; 6.5 is MAST_unit#361. Nothing on control yet. Reworked on 2026-10-19
-> around the generated plan; the 2026-10-18 version designed a separate acquisition path.
-> 2026-10-25: products go to a per-execution folder under `plans/products/` (5.10), replacing
-> the run folder. No questions are open.
+> **Status: step 1 done; step 2 in review.** Step 1: MAST_common#171, #202; MAST_unit#346,
+> #365; MAST_spec#123. Step 2: MAST_common#203, MAST_control#47, MAST_gui#31, landing together.
+> Reworked on 2026-10-19 around the generated plan; the 2026-10-18 version designed a separate
+> acquisition path. 2026-10-25: products go to a per-execution folder under `plans/products/`
+> (5.10), replacing the run folder. Where the code departs from this text, "As built" below
+> says so. No questions are open.
 > Code baseline: MAST_common `master` @ `df2669f`, MAST_unit `main` @ `9fc7be6`,
 > MAST_control `master` @ `abbfe8d`.
 >
 > **Prerequisite, done:** MAST_common#170. `UnitApi` is one instance per unit name (or
 > `ipaddr`), not a process-wide singleton, and the per-unit workers depend on that.
+
+## As built (2026-10-25)
+
+Where the implementation departs from the sections below:
+
+- **`target_coordinates` beside `parse_target`** (3.8), not `parse_target` taking the name:
+  its callers unpack two values. MAST_common#202.
+- **`parse_units` is not used** (3.1). It reads a `Site.valid_ids` that does not exist, so it
+  raises on any call; `parsers.expand_units` expands specifiers to hostnames, unfiltered.
+  `requested_units` is validated by syntax alone on load, so a plan loads without the
+  configuration.
+- **`submit_plan` takes the raw body** (7.1): as a `Plan`, a target given by name alone would
+  be refused for its missing coordinates before it could be resolved.
+- **`Plan.add_event(event, toml_path)`** writes where the execution says the file is.
+- **`Controller.start_execution`** replaces `execute`, and is synchronous: it starts the
+  execution on its own thread, so `start_acquisition` answers at once with the ULID.
+- **`workloads.py` goes** with `Batch`'s execution (5.1).
+- **The rewrite tool** also drops the run-time keys the old model wrote (`run_folder`,
+  `timings`, ...).
+- **`quorum` is the fewest units a plan needs to continue** (decided 2026-10-25). It does not
+  start with fewer eligible units (5.6); it succeeds once that many are guiding (5.5); and it
+  is aborted as soon as fewer remain -- failing on their way to guiding, **or dropping out of
+  guiding during the spectrograph's exposure**, which 5.7 and 10 had left out of scope. A
+  guiding unit drops out when its guider is no longer engaged (a lost star still being sought,
+  PHD2 `LostLock`, does not count) or it is unreachable for 30 s; the exposure is then aborted
+  with the plan and every unit stopped.
+- **`spec_assignment` is `spec`** (decided 2026-10-25): `[spec]` in plan files, `Plan.spec` in
+  code. The sections below keep the old name. The rewrite tool renames it in existing files.
+- **A plan with no spectrograph `instrument` only acquires**, whether `[spec]` is left out or
+  written without one.
+- **The plan token, control's single abort, and how plans end** are 6.6, added 2026-10-26.
+  They supersede 5.5's "workers still running at success keep running" for acquisitions,
+  5.7's "the engine does not stop the exposure", 7.1 step 2 (start_acquisition no longer
+  aborts a previous acquisition; it refuses), and 7.3 (`abort_acquisition`, gone).
+- **Every unit producer writes a `plan_id` file** (and the spectrograph a `batch_id` file for a
+  batch) into each products folder it creates (5.10).
 
 ## 1. Why
 
@@ -727,6 +764,56 @@ with the instrument as the producer. Any other value is logged and not linked.
 
 `UnitAssignment` is then no longer received by any unit; whether it stays in common is
 decided with the spectrograph's `SpectrographAssignment`, which still uses it.
+
+### 6.6 The plan token: one plan, one owner, one abort (decided 2026-10-26)
+
+**Control is the single authority on plans.** It executes one workload -- a plan or a
+batch -- at a time, starts and ends it, and coordinates it across the units and the
+spectrograph. It hands each participant only a **token**, the plan's ULID as `plan_id`, so
+that they can report back under it.
+
+- **The token travels as a query parameter**, `plan_id`, on every request control sends on a
+  plan's behalf: `focus_on_star` and `start_acquisition_and_guiding` on a unit,
+  `execute_assignment` on the spectrograph. Hidden from OpenAPI: it is control's, not an
+  operator's. A participant also writes it into each products folder it makes (`plan_id`,
+  5.10).
+- **The first accepted request carrying a token makes the participant the plan's**:
+  `UnitActivities.ExecutingPlan` / `SpecActivities.ExecutingPlan` (the spectrograph's is
+  `common.spec`'s enum) is raised and the token kept as `plan_id`, reported in status. Start-up
+  is not part of a plan, and carries no token.
+- **While it is the plan's, it refuses any state-changing request that does not carry the same
+  token**: "already working on plan X". `GET` and `abort` always pass. One middleware,
+  `common.plan_token`, on the unit and the spectrograph, covering every route. `ExecutingPlan`
+  keeps the unit busy (`why_busy`), so it never idles out mid-plan.
+- **Nothing switches a participant between plans.** Only an `abort` releases it: at the end of
+  `abort`, after every specific activity was asked to stop, `ExecutingPlan` ends and `plan_id`
+  is cleared. Before a plan starts, control reads every requested unit's `plan_id` and refuses
+  the request if one works for another plan ("mast01: working on plan X; abort it first") --
+  before any plan file is written.
+- **Control has one `PUT /abort`**: it aborts the workload in progress through every
+  participant's own `abort`. `abort_acquisition` and `/plans/cancel` are gone.
+
+**How a plan ends:**
+
+- **A science plan**: the spectrograph is its last actor. Once it has made the plan's products
+  it ends its own `ExecutingPlan` and sends an `AssignmentNotification(state="completed",
+  stage=Spec)` -- or `"failed"` with its errors. Control's handler hands that to the execution,
+  which aborts every unit and completes (or fails) the plan. Backstops for a notification
+  that never arrives: a spectrograph whose status no longer carries the token is done; one
+  silent past its exposure series plus `spec_margin_seconds` has failed.
+- **An acquisition-only plan** (no spectrograph `instrument`): once its quorum is guiding it
+  records `quorum-reached` and **stays control's workload** -- its units keep working for it --
+  until `abort`, after which it is `completed`, since it achieved its goal. An abort before the
+  quorum is `aborted` (`canceled/`).
+- **Either fails** as soon as fewer than `quorum` units remain -- failing on their way to
+  guiding, or a guiding one dropping out (guider no longer engaged; a lost star still being
+  sought, PHD2 `LostLock`, does not count; or unreachable for 30 s). Control then aborts every
+  unit, guiding ones included, and the spectrograph if it is still at it.
+- A plan records its end only once its abort has told every participant.
+
+**Assignment notifications are a handshake** (MAST_common#205): the sender keeps one until
+control answers `ok`, which it does once it has acted on it or deliberately ignored it, and
+errors only for what a resend might fix; control's handlers are idempotent.
 
 ## 7. The acquisition endpoints (MAST_control)
 
