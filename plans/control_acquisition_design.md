@@ -54,6 +54,15 @@ Where the implementation departs from the sections below:
   aborts a previous acquisition; it refuses), and 7.3 (`abort_acquisition`, gone).
 - **Every unit producer writes a `plan_id` file** (and the spectrograph a `batch_id` file for a
   batch) into each products folder it creates (5.10).
+- **The unit starts itself up** (decided 2026-11-04). `focus_on_star` and
+  `start_acquisition_and_guiding` declare `autostartup` (MAST_common#221, MAST_unit#395): the
+  unit starts up, or joins a startup already running, waits up to `seconds_to_autostartup`
+  (120 s), and refuses with its `why_not_operational` unless it is operational or only
+  cooling (`operational_but_for_cooling`). 5.4 steps 1 and 2 are therefore the unit's and
+  are gone from control (MAST_control#53, #54), with `STARTING_UP`, `unit-starting-up`,
+  `Timing.startup_seconds` and the `startup:` / `operational:` prefixes. Step 3, busy, stays:
+  nothing on the unit refuses those routes for being busy. Those two PUTs get a 150 s HTTP
+  timeout (`Timing.autostartup_call_seconds`), above the unit's wait.
 
 ## 1. Why
 
@@ -434,7 +443,7 @@ model for scheduling.
 
 ```python
 class UnitRunState(StrEnum):
-    PENDING, STARTING_UP, FOCUSING, ACQUIRING, GUIDING, FAILED, ABORTED
+    PENDING, FOCUSING, ACQUIRING, GUIDING, FAILED, ABORTED     # STARTING_UP gone (As built)
 
 @dataclass
 class UnitRun:
@@ -489,8 +498,6 @@ appends an error prefixed with its step and sets `FAILED`:
 
 | Prefix | The unit stopped |
 | --- | --- |
-| `startup:` | starting up, or in an opstate it cannot start from |
-| `operational:` | not operational, for a reason other than cooling |
 | `busy:` | busy with something other than this plan |
 | `focus_on_star:` | in `focus_on_star` |
 | `acquisition:` | in the acquisition phases, before the handover to the guider |
@@ -503,15 +510,17 @@ means control could not ask, so the unit's own state is unknown, and it says so.
 **Unreachable.** A failed status poll is retried; a unit unreachable for **30 s** in a row
 fails with `"status: unreachable for 30 s"`. A shorter outage only delays the step it is in.
 
-1. **Opstate.** `initialized` or `shutdown`: `PUT startup`, `STARTING_UP`, wait for
-   `opstate == startedup` (600 s). `startedup`: go on. `None`: fail, "status: opstate not
-   reported". Anything else: fail, "startup: opstate is `<x>`".
-2. **Operational.** Go on if `operational`, or if `why_not_operational` is non-empty and every
-   entry starts with `COOLING_DOWN_REASON`. Otherwise fail with the reasons; an empty list
-   with `operational == False` fails with "not operational, no reason given".
-3. **Busy.** `why_busy == {}`: go on. `None`: fail, "status: busy state not reported". Non-empty:
-   fail, `"busy: <owner>: <flags>; ..."`. (`CoolingDown` is not in `why_busy`, so a unit
-   that is only cooling passes both 2 and 3.)
+1. **Opstate** -- *the unit's since 2026-11-04 (As built).* Control sends no `startup`; the
+   PUTs of steps 4 and 5 start the unit up. Control still fails "status: opstate not
+   reported" when `opstate` is `None`.
+2. **Operational** -- *the unit's since 2026-11-04.* The same rule, `operational_but_for_cooling`,
+   is the unit's autostartup gate; its refusal fails the unit as `focus_on_star:` or
+   `acquisition:`, in the unit's words.
+3. **Busy** (`_not_busy`). Another plan's `plan_id`: fail, `"busy: working on plan <ulid>"`,
+   whatever the opstate. Not `startedup`: go on -- `why_busy` is unknown (`None`) outside
+   STARTED_UP, and the unit is doing nothing. Otherwise `why_busy == {}` (this plan's own
+   `ExecutingPlan` excepted): go on. `None`: fail, "status: busy state not reported".
+   Non-empty: fail, `"busy: <owner>: <flags>; ..."`. (`CoolingDown` is not in `why_busy`.)
 4. **`focus_on_star`**, if `plan.autofocus`. `PUT focus_on_star` with `zenith=false`, the
    coordinates and `plan_ulid`; set `FOCUSING`. Errors from the PUT fail the unit. Poll
    `focus_on_star_status` until `active == False` (600 s). `outcome == "solved"`: go on.
@@ -594,7 +603,6 @@ plan's log even if control dies mid-run.
 | `generated` | `start_acquisition` wrote the plan (7.1) | the request, coordinates as typed |
 | `resolved` | a name was resolved when the plan was written (3.8) | `<name> -> ra=... dec=... via <service>`, the canonical name |
 | `executing` | the execution started | `products: <path>`, `units: [...]`, `quorum: <n>` |
-| `unit-starting-up` | a worker sent `startup` | `<unit>` |
 | `unit-focusing` | a worker sent `focus_on_star` | `<unit>` |
 | `unit-acquiring` | a worker sent `start_acquisition_and_guiding` | `<unit>` |
 | `unit-guiding` | a unit reached `GUIDING` | `<unit>` |
