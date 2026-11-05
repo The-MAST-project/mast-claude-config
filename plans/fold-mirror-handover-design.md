@@ -12,7 +12,7 @@
 > |---|---|---|---|
 > | MAST_unit | `eli/exclude-region` @ `9e012ba` | MAST_unit#30 | `main` @ `f76987b` |
 > | MAST_common | `eli/exclude-region` @ `91e6674` | MAST_common#13 | `master` @ `8fc6c3e` |
-> | PHD2 | `eli/mastbuild5`, build `2.6.14dev1mastbuild5` | none | upstream `master` @ `a6c02722` |
+> | PHD2 | `eli/mastbuild6`, build `2.6.14dev1mastbuild6` | none | upstream `master` @ `a6c02722` |
 >
 > The PHD2 branch is **not hosted on GitHub**. Hosting a MAST fork is deliberately
 > deferred, so §4 is the record of what the build changes: a contract precise enough
@@ -223,9 +223,9 @@ working exclusion look broken. The on-sky check was done by widening the band an
 watching selection move to another star. Any tool that checks the exclusion must
 translate by the crop origin and the binning first, as PHD2 does internally (§4.1).
 
-## 4. PHD2 contract — build `2.6.14dev1mastbuild5`
+## 4. PHD2 contract — build `2.6.14dev1mastbuild6`
 
-Upstream `master` @ `a6c02722` plus four commits (provenance only):
+Upstream `master` @ `a6c02722` plus these commits (provenance only):
 
 | Commit | Change |
 |---|---|
@@ -234,9 +234,11 @@ Upstream `master` @ `a6c02722` plus four commits (provenance only):
 | `63c5a7ec` | include `toupcam.dll` in the x64 installer — an upstream packaging bug, unrelated to this design, without which the x64 build does not launch |
 | `c8d71417` | `PHDSUBVER` = `dev1mastbuild5` |
 | `10484fe9` | `Peak`, `Background`, `BackgroundSigma` on `GuideStep` and `StarLost` (§4.3) |
+| `b73db7fc` | `PrimaryDx`, `PrimaryDy` on `GuideStep`; `PHDSUBVER` = `dev1mastbuild6` (§4.5) |
 
-`mastbuild4` (the earlier stack on PHD2's `eli/exclude-region`) carries §4.1 and §4.2
-only.
+`mastbuild5` is the same without `b73db7fc`, and is what mast01 runs until mastbuild6 is
+installed. `mastbuild4` (the earlier stack on PHD2's `eli/exclude-region`) carries §4.1 and
+§4.2 only.
 
 ### 4.1 Exclusion region
 
@@ -306,6 +308,28 @@ Not changed by the build, but load-bearing:
 - `deselect_star` clears the selection so the next guide RPC auto-selects.
 - `set_lock_position {x, y, exact}` while guiding is reported to the algorithms as a
   dither and triggers no settle.
+
+### 4.5 The primary star's own offset on `GuideStep`
+
+With MultiStar on, `dx`/`dy` on `GuideStep` is the offset PHD2 guided on: after
+stabilization, the SNR-weighted average of the primary and its secondaries whenever that
+average is smaller than the primary's own offset. After a lock move the secondaries are
+re-referenced where they sit once the primary is within 2σ of the new lock, so that average
+can read about zero while the primary is still pixels off the lock (MAST_unit#401). Two
+fields carry the primary alone:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `PrimaryDx` | number, 3 dp | primary star centroid minus lock position, x, camera pixels (the same frame as `dx`) |
+| `PrimaryDy` | number, 3 dp | the same, y |
+
+Set from `GuiderOffset.primaryCameraOfs`, assigned beside `cameraOfs` in
+`GuiderMultiStar::UpdateCurrentPosition` before `RefineOffset` runs. Equal to `dx`/`dy`
+while stabilizing and on single-star frames. On a dither fast-recenter step they are the
+primary's offset while `dx`/`dy` is the recenter step. Omitted on steps that measured no
+star (an AO bump, a deduced move). Bench, labcomp2 simulator, 2026-11-05: 87 steps, all
+carrying the fields; 32 `refined` frames differed and matched the debug log's
+`one-star: {…}`, plus the one recenter step.
 
 ## 5. MAST_common contract — `PHD2Config`
 
