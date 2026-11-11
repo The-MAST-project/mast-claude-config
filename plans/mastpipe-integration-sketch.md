@@ -88,7 +88,7 @@ What it does not have yet, for a subprocess caller:
   (`commands.py:112-122`) and returns 2 both when one frame failed and when the whole run
   could not start; a library lock timeout or a bad `index.json` escapes as a traceback with
   exit 1 (`runner.py:318`, outside the per-group handling). Control needs something like a
-  `--summary-json` and distinct exit codes -- a mastpipe change (Q9).
+  `--summary-json` and distinct exit codes -- a mastpipe change (Q10).
 - **Logging to stderr.** The full INFO log goes to stderr as well as to
   `OUT/logs/quicklook_<YYYYmmddTHHMMSS>.log` (`runner.py:150-157`), so the caller must drain
   or redirect both pipes. The log name has one-second resolution and is opened in append
@@ -104,9 +104,10 @@ What it does not have yet, for a subprocess caller:
    instrument, the spectrograph folder(s) linked under `Spec/`, and the plan's products folder.
 2. **Wait for the share.** The plan can end before its frames are on the share: products
    reach it after the RAM-to-share move, which control's linker already treats as the normal
-   order (`controller.py:1062`, `:1100`). The job waits for `latest.json` in the folder on the
-   share, then for as many FITS files as it says were saved -- the mover does not guarantee
-   the order of files. `plan_id` is no use here: it is there before the first frame.
+   order (`controller.py:1062`, `:1100`). Today the only signal is indirect: wait for
+   `latest.json` in the folder on the share, then for as many FITS files as it says were
+   saved. `plan_id` is no use: it is there before the first frame. §5.3 proposes a direct
+   signal, and a sweeper that does not depend on this step at all.
 3. **Run.** A job runner in MAST_control starts `mastpipe quicklook` as a **separate process**
    (`asyncio.create_subprocess_exec`), never in control's own process: a reduction must not
    be able to stall or crash control, and control must be able to kill one. Its stdout and
@@ -145,7 +146,7 @@ plans/products/PLAN_<ulid>/<UTC start>/
   §5.2 on who may write to it.
 - **Frames taken outside a plan** -- operator exposures under `Exposures/seq=NNNN`, the
   bench, and today *all* calibration frames -- have no plan folder and send no notification.
-  They need a home too (Q5).
+  They need a home too (Q6).
 
 ## 5. Choices
 
@@ -207,7 +208,46 @@ What is **not** safe as it stands:
 
 **Throttling.** A queue in MAST_control whose concurrency limit is lower (or zero: queue
 only) inside `Site.observing_window()`, and higher outside it. If the night limit only
-defers jobs, the queue has to survive a control restart (Q7).
+defers jobs, the queue has to survive a control restart (Q8).
+
+### 5.3 Getting the frames there, and catching what is missed
+
+**How the copy works today.** MAST_common's `Filer.move_ram_to_shared` (`filer.py:1013`)
+moves *files* one by one through a pool of four workers (`filer.py:273-276`), so files reach
+the share in no guaranteed order. When the share is unreachable a file is held back -- in RAM,
+recorded in an in-memory queue a background loop retries every 30 s (`filer.py:256-262`), or
+in the share's fallback area, drained when the share returns (`filer.py:904`). Nothing
+says "this folder is now complete on the share". A notification-only trigger therefore has
+two gaps: it cannot tell when a folder has landed, and anything it misses (an aborted plan
+before this sketch's trigger, a lost notification, a control restart, a share outage, frames
+taken outside a plan) is never reduced.
+
+Two complementary changes close them (team direction, 2026-11-11: a sweeper and/or a change
+to the copy):
+
+- **A completion marker, copied last.** The producer hands the mover a folder's marker file
+  (`latest.json`, or a new `complete.json` listing its frames with sizes or checksums) only
+  after the mover has confirmed every frame of the folder on the share. The marker's
+  presence on the share then *means* the folder is complete, and any reader -- control, a
+  sweeper, a person -- can trust it without counting files. This is a MAST_common `Filer`
+  change (a "move these, then that" call, or a completion callback), used by MAST_spec, and
+  by MAST_unit if its products want the same.
+- **A reduction sweeper on mast-ns-control.** A periodic job, owned by MAST_control, that
+  walks the spectrograph folders on the share and queues every folder that has its
+  completion marker and no up-to-date reduction. Each folder's `plan_id` says which plan
+  bundle its reduction goes into; a folder without one (operator, bench, calibration frames)
+  goes to a non-plan location (Q6). Because mastpipe skips products whose inputs are
+  unchanged, a pass over already-reduced folders costs little.
+
+With both, the **sweeper is the source of truth** and the plan-end trigger in §3 becomes a
+latency optimization: it wakes the sweeper for one folder instead of waiting for the next
+pass. Nothing is lost when a notification is, when control restarts (Q8 mostly goes away),
+or when the share was down, and the morning pass of §5.1 is the same sweeper run with the
+night's calibrations in the library. The sweeper also gives calibration frames taken outside
+plans a route into the library (Q2).
+
+Either alone helps: the marker without the sweeper makes step 2 of §3 exact; the sweeper
+without the marker has to keep counting frames against `latest.json`.
 
 ## 6. Open questions
 
@@ -218,25 +258,28 @@ defers jobs, the queue has to survive a control restart (Q7).
    sequence that control runs and feeds to the library, operator calibrations swept into it,
    a carried-over library with a maximum master age -- and what does a run do when there is
    none: fail and re-queue, or wait?
-3. **"On the share and settled":** is `latest.json` plus a frame count enough, or should the
-   mover say when a folder is complete? And what is the job's timeout?
-4. **The throttle:** is `Site.observing_window()` the right notion of observation hours, or
+3. **The completion marker (§5.3):** reuse `latest.json` or add a dedicated marker? Does
+   `Filer` order it (move the frames, confirm, then the marker), or does it call back when a
+   set of moves has finished? Does MAST_unit adopt it too?
+4. **The sweeper (§5.3):** how often does it walk the share, how far back, and how does it
+   know a reduction is up to date -- a `job.json` per folder, or mastpipe's own idempotence?
+5. **The throttle:** is `Site.observing_window()` the right notion of observation hours, or
    "a plan is in progress", or the roof? Is the night limit 0 or 1?
-5. **Frames outside a plan:** where do operator, bench and calibration frames get reduced,
+6. **Frames outside a plan:** where do operator, bench and calibration frames get reduced,
    and where do their products land?
-6. **Bundle layout:** `reduction/mastpipe/` as above, or somewhere else in the plan folder?
+7. **Bundle layout:** `reduction/mastpipe/` as above, or somewhere else in the plan folder?
    Does `job.json` duplicate what the plan's events say?
-7. **Job durability:** a queue in memory loses jobs on a control restart. Acceptable for a
+8. **Job durability:** a queue in memory loses jobs on a control restart. Acceptable for a
    quick-look (the morning pass catches up), or does the queue persist?
-8. **Where it runs:** mast-ns-control has the share as a local disk, which is why control
+9. **Where it runs:** mast-ns-control has the share as a local disk, which is why control
    owns the plan folder. Does it also have the CPU and memory for mastpipe during a night,
    next to MAST_control's own work?
-9. **mastpipe's caller contract (Na'ama):** a `--summary-json` (or similar), exit codes that
+10. **mastpipe's caller contract (Na'ama):** a `--summary-json` (or similar), exit codes that
    tell "some frames failed" from "the run failed", and run-level failures (lock timeout, a
    bad index) reported the same way as the rest.
-10. **Packaging:** mastpipe in its own venv on mast-ns-control, called by path, so its
+11. **Packaging:** mastpipe in its own venv on mast-ns-control, called by path, so its
     dependencies never meet MAST_control's? Which version is deployed, and who upgrades it?
-11. **DeepSpec:** mastpipe reduces HighSpec today; DeepSpec folders end plans the same way.
+12. **DeepSpec:** mastpipe reduces HighSpec today; DeepSpec folders end plans the same way.
     Queue them and skip, or do not queue until mastpipe supports them?
 
 ## 7. Possible phasing
@@ -246,10 +289,12 @@ defers jobs, the queue has to survive a control restart (Q7).
    calibrations. Proves the layout and makes Q2 concrete (needs the frame contract's M1).
 2. **One job at a time, no throttle.** Control queues a job from `_execution_ended`, waits
    for the share, runs mastpipe as a subprocess at concurrency 1, records the result.
-   Needs Q9 on mastpipe's side and an answer to Q2.
+   Needs Q10 on mastpipe's side and an answer to Q2.
 3. **Throttle and concurrency.** The observing-window limit, and N > 1 once Q1 is settled.
-4. **Morning pass, per plan,** if night-time runs leave products short of the night's
-   calibration.
+4. **The sweeper and the completion marker (§5.3).** The marker in MAST_common's `Filer`
+   and MAST_spec; the sweeper in MAST_control, which then also serves as the morning pass and
+   the route for frames outside plans. Could come before phase 3: once the sweeper exists, the
+   plan-end trigger is only an optimization.
 
 ## Provenance
 
