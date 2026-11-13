@@ -6,13 +6,24 @@
 |---|---|
 | 0 — the live store, generation-keyed memoization | **Landed**, `MAST_common` #95 |
 | 1 — watcher, `on_change`, degraded mode, boot cache | **Landed**, `MAST_common` #96 |
-| 2 — consumers: `control`, `gui`, `spec`, `unit` | Not started |
-| 3 — remove the deprecated shims, org-wide grep | Not started |
+| 2 — consumers: `control`, `gui`, `unit` | **Landed.** Each opts in with `Config().start_watching()` in its entry point: `control/app.py` (MAST_control#36), `gui/MAST_gui/apps.py` (MAST_gui#24), `unit/src/app.py` (MAST_unit#196) |
+| 2 — consumers: `spec` | **Landed in code**: components are live properties (MAST_spec#128) and `lifespan` starts the watcher (MAST_spec#130). **Not yet confirmed on mast-ns-spec**; see below |
+| 3 — remove the deprecated shims, org-wide grep | Not started: `clear_mongo_ttl_cache()` and `fetch_config_section()` are still in `common/config/__init__.py`, warning with `DeprecationWarning` |
 
-Nothing in the fleet behaves differently yet: `start_watching()` is opt-in and no service
-calls it, so phase 2 is what turns the mechanism on. What phases 0–1 did change is that
-`set_unit` now sees its own write, and that an unreachable controller raises `ConfigError`
-rather than a bare `ServerSelectionTimeoutError` (MAST_common#82).
+*Status as of 2026-11-13, read from the code in each repo's clone, not from a run on the fleet.*
+
+All four consumers now track the database: an edit should reach a running `control`, `gui`,
+`unit` or `spec` within seconds. What phases 0-1 changed for everyone is that `set_unit` sees its own write, and that an
+unreachable controller raises `ConfigError` rather than a bare
+`ServerSelectionTimeoutError` (MAST_common#82).
+
+**`spec` shipped half of phase 2 for a while.** MAST_spec#128 (2026-10-28) converted its
+components to live properties and added `tests/test_config_is_live.py`, but properties only
+help if something advances the generation, and the watcher is opt-in: `spec/app.py`'s
+lifespan did not start it, so an edit made elsewhere waited for a restart until MAST_spec#130
+(2026-11-13) added `Config().start_watching()` there, paired with `stop_watching()`, and a
+test that guards both. The open check is the one #128 left unrun: on mast-ns-spec, change a
+stage preset in the database and see it used without a restart.
 
 Where this document was revised by what implementation turned up, the section says so
 inline rather than being quietly corrected — the reasoning that was wrong is usually more
