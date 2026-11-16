@@ -260,6 +260,123 @@ before that change have a single `spec` folder.
 
 The simulation scripts reproduce every number in this doc and can be pointed at the real-frame catalogues: `psf.py`, `sim_coma.py`, `sim_shadow.py`, `sim_skystep.py`, `sim_wcs.py`, `sim_wcs2.py`. They are not in a repo yet.
 
+## Implementation stages (feeding the solver)
+
+*Added 2026-11-16. The sections above give the design, the integration points and the test plan;
+this orders them. Each stage has an exit, and the flag `solving.source_selection` stays `off`
+until Stage 4 has passed. Guiding is out of scope here (see `inhouse_guiding_design.md` §11).*
+
+### Rules that apply to every stage that touches `mastrometry.py`
+
+From `src/solvers/CLAUDE.md` and `COORDINATE_SURFACE.md` in `MAST_unit`:
+
+- **All coordinate math goes through `solvers/pixel_grid.py`** (`orig_to_grid_fits`,
+  `grid_to_orig_fits`, `roi_center_to_crpix`). Nothing hand-rolled, nothing inline. The surface has
+  produced two silent sub-arcsecond bugs, a half-pixel offset and an integer-division `refpix`
+  that put ~0.4 arcsec on the spec path, and a wrong xylist would fail the same way: it still
+  solves, and the only symptom is a small constant pointing offset.
+- **Changing the `solve-field` flags counts as touching the surface.** The xylist input,
+  `--width`/`--height` and `--uniformize 0` all do, so `solvers/tests/` must be run **by hand**
+  on a machine that has `solve-field` and the index set (`D:\mast-indexes`): a unit, a dev unit or
+  labcomp2. CI cannot run them. **A skip is not a pass:** run with `-ra` and confirm they ran, and
+  if they cannot be run, say so in the PR and ask for a run on a unit instead of reporting the
+  change as verified.
+- **Tweak stays on.** Do not add `--no-tweak` (the equivalence study measured up to ~7 arcsec of
+  disagreement with the reference solver without SIP).
+- **Artifact names come from the input's stem** (`<stem>,solver=<name>...`). Never `.replace(".fits", ...)`
+  (MAST_unit#314). This applies to the xylist file, the survey images and the result text alike.
+
+### Stage 0: the selection module and the survey (offline, no behaviour change)
+
+- **Build** `select_sources(...)` in a new `src/solvers/source_selection.py`: pure, ndarray and
+  `ShadowModel` in, a `Selection` out (the kept sources, and every rejected source with its
+  reason). The fixed-window centroid is `sep.winpos`, or a ~30-line numpy version if `sep` is not
+  to be a new dependency.
+- **Build the survey** of Step 0 above: the per-frame table, the annotated image, and a survey
+  `solve-field` call with `--corr`. It calls `solve-field` itself, because `MastrometryDotNet`
+  passes `--corr none`, `--rdls none` and `--match none`.
+- **Tests** on saved FITS files, including that the same image run twice gives the same result.
+- **Exit:** the survey has run on frames from the share. The consistency result, the penumbra
+  width and the number of stars kept per frame (and per cropped spec ROI) are known.
+- *Touches:* MAST_unit only, in `tools/` and the new module. The solver is unchanged.
+
+### Stage 1: fix the parameters on real frames
+
+- **Do** Step 1 above: residuals against Gaia, split by flux, by distance from the optical centre,
+  across the shadow band, by peak over full scale, by nearest neighbour and by SNR.
+- **Decide** the centroid method (the claim is no magnitude equation for the fixed window),
+  `max_shadow_deficit`, `sat_frac`, `min_sep`, `min_snr` and `coma_px`.
+- **Exit:** each starting value in the Parameters table is confirmed or replaced by a measured one.
+  If the fixed window shows a magnitude equation on real frames, stop and rethink before building
+  further.
+
+### Stage 2: the xylist path behind the flag (default `off`)
+
+- **`MastrometryDotNet._solve_in`:** after the crop and before the binning, call `select_sources`.
+  Write the xylist through `pixel_grid`, and run `solve-field` on it with `--uniformize 0`, the
+  binned ROI's `--width`/`--height`, and the existing scale, RA/Dec, CRPIX and tweak flags. Keep
+  writing the downsampled image: it is the fallback input and keeps `--new-fits` working.
+- **Verify the xylist's pixel origin first.** Whether `solve-field` reads xylist positions as
+  0- or 1-based has to be settled on a known frame before anything else is built on it. A
+  half-pixel error here is the same silent bug the surface has already produced twice.
+- **Result:** add `selection` to `SolvingResult` (counts per reject reason, the number kept, the
+  radius used, the fit order, the xylist path), and log it in place of the "FUTURE: image quality
+  check" box. Fewer than 8 stars fails the frame as `too_few_sources`.
+- **Fallback:** a failed xylist solve falls back to the image solve and records
+  `selection: fallback`.
+- **Config:** the flag (`off | shadow_only | full`) and the parameters go in unit config, which is a
+  change to **MAST_common** (its own PR, merged first, then a pull on each machine). All fields are
+  optional with defaults, so nothing changes until the flag does.
+- **Tests:**
+  - *pure, in CI:* in `tests/test_pixel_grid.py`, the xylist conversion round-trips and pins the
+    convention, including a crop offset and a fractional CRPIX;
+  - *by hand, in `solvers/tests/`:* the xylist solve and the image solve agree on a clean frame to
+    sub-arcsecond after converting through `pixel_grid`.
+- **Exit:** with the flag `off` the behaviour is unchanged, and with it on a clean frame solves the
+  same either way. The hand-run tests have run, not skipped.
+
+### Stage 3: the mirror state
+
+- **The shadow input must follow the mirror, not the phase name.** The design takes the shadow
+  from `detect_mirror_shadow` for `spec` and uses none for `sky`. Since MAST_unit#405 an FCU v2
+  acquisition has two `spec` phases, `spec-mirror-out` and `spec-mirror-in`, and
+  `Solver.solve` maps both to `"spec"`. Selection has to be told whether the mirror is in
+  (from the stage position, or passed explicitly), or the mirror-out frame is given a shadow it
+  does not have.
+- **`shadow_only`:** the design lists this value but does not define it. A reading is "only the
+  shadow reject is applied, then the list is handed over". Confirm or replace it here.
+- **Exit:** both v2 phases get the right shadow handling on a unit with the flag on.
+
+### Stage 4: the A/B on real frames
+
+- **Do** Step 2 above: every frame solved both ways, today's image solve and the xylist solve with
+  `full`, compared on the fibre-pixel RA/Dec spread, the dense-versus-sparse shift, the success
+  rate, the solve time, and the match count and RMS.
+- **First measure the floor.** On the spec path, moving CRPIX off-centre re-anchors the SIP fit and
+  moves the reported `CRVAL` by ~0.5 to 1.5 arcsec, and a small cropped field shifts a solution a
+  further ~3 to 4 arcsec against a full-frame solve (`COORDINATE_SURFACE.md`). The proposed
+  criteria (a 30% smaller spread, a dense-versus-sparse shift under 0.05 arcsec) are small against
+  that. Repeat today's image solve on the same frame and on consecutive frames, and judge the
+  criteria against that scatter, not against zero.
+- **Check the order-1 fallback.** The design uses `--tweak-order 1` below 20 stars. The
+  equivalence study found that no tweak at all over-constrains the WCS to a linear fit, and that
+  SIP is what fixes the corners; whether order 1 behaves like that is not established. Solve the
+  few-star frames at order 1 and order 2 and compare. The Stage 0 counts say how often a cropped
+  spec ROI falls under 20 stars, and so how much this matters.
+- **Pass criteria (proposed, to be set against the floor):** repeated-frame fibre-pixel spread down
+  by at least 30%; dense-versus-sparse shift under 0.05 arcsec; success rate no lower than today's;
+  with the mirror in, no star kept by the shadow cut has a residual above 1 px that correlates
+  with the distance across the band; solve time under the 30 s CPU limit.
+- **Exit:** all of them pass. If not, adjust the parameters and run again; the flag stays `off`.
+
+### Stage 5: enable
+
+- One unit on `full` for some nights, watching the `selection` records and the fallback rate; then
+  the other units, one at a time. Fallback to the image solve is one config change and a restart.
+- Afterwards the open questions above: whether to feed full-resolution positions and drop the
+  2x2 binning (which removes the coordinate surface, and so reopens `COORDINATE_SURFACE.md`), and
+  whether `--pixel-error` should tighten from 1 to 0.5 binned pixels.
+
 ## Assumptions and open questions
 
 **Simulation assumptions**
