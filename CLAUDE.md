@@ -39,7 +39,7 @@ truly global items (proxy, working-style) stayed.
 
 ## Layout
 
-- `skills/` — reusable Claude Code skills (`/wip-commit`, `/wip-status`, `/sync-units`, `/wiki-sweep`)
+- `skills/` — reusable Claude Code skills (`/wip-commit`, `/wip-status`, `/wiki-sweep`)
 - `memory/` — shared, cross-cutting memories only (working-style, project-wide facts)
 - `plans/` — design notes that span repos or predate their home repo
 - `code-validation-and-ci-guidelines.md` — linting, testing and CI standards for every

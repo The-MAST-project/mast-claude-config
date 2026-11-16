@@ -130,7 +130,7 @@ MountCorrector  (PWI4 mount_offset + Mount.wait_until_settled)
   per-frame centroid engine on a small box around the last position. Emits
   `(dx, dy, snr, hfd, peak_adu, mass)`. Alternative estimator for rich fields:
   whole-ROI correlation shift via `science/find_shift.py` /
-  `cross_corellate.py`, pluggable behind the same interface.
+  `cross_corellate.py`, pluggable behind the same interface. Worked out in §11.
 - **`CorrectionPolicy`** (`correction_policy.py`) — the PHD2 port (§4); pure,
   `update(error_arcsec) -> RaDec | None`.
 - **`MountCorrector`** (`mount_corrector.py`) — thin adapter over `Mount` /
@@ -359,7 +359,120 @@ hardware):
 
 ---
 
+## 11. Guiding on a fixed star set chosen from the reference frame
+
+*Added 2026-11-16 from a design discussion. Direction agreed; the estimator is not decided.
+Companion to `mastrometry_source_selection_design.md`, whose rejects choose the stars.*
+
+§3 designs `StarTracker` as a centroid tracker on one star and mentions correlation over the
+whole ROI as an alternative. This section records the reasoning for tracking **several stars**
+and what has to be measured before building it.
+
+### 11.1 Direction
+
+- **Choose the guide stars once, from the reference frame, and track those.** The reference is
+  the frame taken with the fold mirror at SPEC: on FCU v2 the solve of the `spec-mirror-in`
+  phase (MAST_unit#405), whose frame is the one held as `unit.reference_image`. The mirror
+  has to be in because a mirror-induced shift cannot be told from a pointing change (D14 of
+  `fold-mirror-handover-design.md`).
+- **Do not re-select every frame.** Seeing changes how many stars pass the SNR cut, so a
+  re-selected set makes the estimate jump as stars enter and leave. A fixed set is weighted
+  smoothly instead: a fading star counts less and a lost one drops out.
+
+### 11.2 Why several stars, and why it is differential
+
+- Guiding measures the **change** since a reference taken in the same optical configuration. A
+  star's coma offset and centroid bias are the same in the reference and in every later frame,
+  so they cancel. That is why the fixed-window-versus-first-moment result of the source-selection
+  design matters for absolute astrometry and much less here, provided the **same estimator** is
+  used on the reference and on every frame. What does not cancel is how the bias changes when
+  seeing or focus changes; that is second-order.
+- Many stars average the noise down: from the simulation, 0.057 arcsec with 8 stars against
+  0.019 arcsec with 60 at the fibre.
+- **The spread of the per-star displacements is a health signal.** With one star a cloud and a
+  drift look alike. With 10 to 30 stars the scatter rises when clouds or seeing degrade the
+  measurement, and the loop can stop correcting. It feeds `lock_validity` and `sky_quality`.
+
+### 11.3 Clouds and seeing
+
+| Condition | Effect | Handled by |
+| --- | --- | --- |
+| Uniform thin cloud | SNR falls, positions do not move | SNR weights |
+| Patchy cloud | stars fade unevenly | a robust (weighted median or clipped) combination over per-star displacements |
+| Bright, cloud-lit background | structure that a whole-frame correlation can lock onto | background removal, or per-star stamps instead of the frame |
+| Seeing changes | peak broadens, not shifts; fewer stars pass SNR | a fixed star set, smooth weights |
+| Seeing-induced image motion | real, correlated across the field | the loop follows it, at low bandwidth |
+
+### 11.4 What to take from the source-selection design
+
+- **Take:** the hard rejects, applied once to the reference to choose the set: shadow deficit,
+  saturation, hot pixels, blends, edge truncation, SNR. A star that saturates when seeing
+  improves, a blend whose separation changes with seeing, or a star near the shadow whose shift
+  flips with focus is a bad guide star. Also the fibre exclusion zone (§4) and an edge margin,
+  because the mount drifts and stars leave the box.
+- **Skip:** ranking by `coma_px` and widening the radius to reach 30 stars. That is tuned to
+  absolute astrometry. For guiding take whatever clean stars the ROI has.
+
+### 11.5 Two forms of "correlation"
+
+- **Whole-frame correlation** (what `science/cross_corellate.py` does, with
+  `skimage.registration.phase_cross_correlation`): least code and no star list. It needs the
+  shadow masked and the background removed, it weights bright stars, and a cloud hurts it most.
+- **Per-star stamp matching against the reference stamps**, combined robustly: more code, and
+  it gives the scatter diagnostic and the cloud robustness above. **Preferred;** not decided.
+
+Both would sit behind the `StarTracker` interface. `cross_corellate.py` today is a script with
+hard-coded paths, not a module.
+
+### 11.6 Risks
+
+1. **How many clean stars the guide ROI has.** It is small, centred on the fibre, and the shadow
+   and the fibre exclusion cut into it. With only 3 to 5 usable stars the multi-star advantage
+   mostly goes, and the scatter is not reliable. Measure this first (11.7).
+2. **Rotation and scale over hours.** A fixed reference goes stale through differential
+   refraction and flexure. Fit translation only at first and check the residual; re-reference from
+   the validation solves of §3.
+3. **Lever arm to the fibre.** The target is in the fibre, not at the guide stars. Rotation of
+   the field acts on the offset between them. A translation-only fit ignores it.
+4. **Frame cadence against star SNR.** The guide exposure has to be long enough for the chosen
+   stars to be well above the noise; unmeasured (also open question 3).
+
+### 11.7 First step: a survey on frames already on the share
+
+Before any guider code, run the selection on frames that are already on the operational
+share, with one survey solve of the filtered list per frame. This is Step 0 of the test plan in
+`mastrometry_source_selection_design.md`; its two questions are the ones this section needs
+answered:
+
+- **Consistency.** The same image run several times (it should be identical; a difference is a
+  bug), and consecutive frames of one field, matching sources between them. A star that passes in
+  one frame and fails in the next is a poor guide star.
+- **Penumbra width.** For several images, the exclusion half-width across the shadow band beyond
+  which the kept stars' residuals stop depending on the distance across the band; repeated at
+  different focus. That width is the exclusion of guide-star selection too.
+
+It also answers risk 1: the number of stars kept per frame, and inside the guiding ROI.
+
+The survey writes one annotated image per frame: the frame with the mirror shadow masked
+(umbra and penumbra), and two sets of ticks in two colours, the filtered list that is fed to
+the solver and the stars the solver actually matched (details in Step 0 of the other document).
+The same picture shows which stars would make good guide stars and which the solver itself
+distrusted. An optional layer shows the stars the hard rejects dropped, labelled by reason.
+
+### 11.8 Open questions
+
+1. Whole-frame correlation or per-star stamps (11.5).
+2. The combination rule: weighted median, or a clipped weighted mean, and the weights.
+3. Translation only, or translation plus rotation (11.6).
+4. When to re-reference during a long guiding run.
+5. What the loop does when too few stars remain, or the scatter is too high: hold corrections
+   (this fits v1 "stop and report" of §4), and when to give up.
+
+---
+
 *Provenance: research and design 2026-07-21 (mast02). PulseGuide findings from
 read-only inspection of the local PW ASCOM driver + PWI4, PW's HTTP API
 document, the PWI4 CHANGELOG, and the open-phd-guiding list. Code references to
 `MAST_unit` branch `calibration`.*
+
+*§11 added 2026-11-16 from a design discussion of guiding on stars chosen from the reference frame; it draws on `mastrometry_source_selection_design.md` and `fold-mirror-handover-design.md`.*

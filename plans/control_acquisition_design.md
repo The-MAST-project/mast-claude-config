@@ -7,13 +7,62 @@
 > engine**, which replaces the stepped `probe -> dispatch -> wait_for_guiding` phases with
 > one worker thread per unit and a quorum.
 >
-> **Status: plan only, not implemented.** Reworked on 2026-10-19 around the generated plan;
-> the 2026-10-18 version designed a separate acquisition path. No questions are open.
+> **Status: step 1 done; step 2 in review.** Step 1: MAST_common#171, #202; MAST_unit#346,
+> #365; MAST_spec#123. Step 2: MAST_common#203, MAST_control#47, MAST_gui#31, landing together.
+> Reworked on 2026-10-19 around the generated plan; the 2026-10-18 version designed a separate
+> acquisition path. 2026-10-25: products go to a per-execution folder under `plans/products/`
+> (5.10), replacing the run folder. Where the code departs from this text, "As built" below
+> says so. No questions are open.
 > Code baseline: MAST_common `master` @ `df2669f`, MAST_unit `main` @ `9fc7be6`,
 > MAST_control `master` @ `abbfe8d`.
 >
 > **Prerequisite, done:** MAST_common#170. `UnitApi` is one instance per unit name (or
 > `ipaddr`), not a process-wide singleton, and the per-unit workers depend on that.
+
+## As built (2026-10-25)
+
+Where the implementation departs from the sections below:
+
+- **`target_coordinates` beside `parse_target`** (3.8), not `parse_target` taking the name:
+  its callers unpack two values. MAST_common#202.
+- **`parse_units` is not used** (3.1). It reads a `Site.valid_ids` that does not exist, so it
+  raises on any call; `parsers.expand_units` expands specifiers to hostnames, unfiltered.
+  `requested_units` is validated by syntax alone on load, so a plan loads without the
+  configuration.
+- **`submit_plan` takes the raw body** (7.1): as a `Plan`, a target given by name alone would
+  be refused for its missing coordinates before it could be resolved.
+- **`Plan.add_event(event, toml_path)`** writes where the execution says the file is.
+- **`Controller.start_execution`** replaces `execute`, and is synchronous: it starts the
+  execution on its own thread, so `start_acquisition` answers at once with the ULID.
+- **`workloads.py` goes** with `Batch`'s execution (5.1).
+- **The rewrite tool** also drops the run-time keys the old model wrote (`run_folder`,
+  `timings`, ...).
+- **`quorum` is the fewest units a plan needs to continue** (decided 2026-10-25). It does not
+  start with fewer eligible units (5.6); it succeeds once that many are guiding (5.5); and it
+  is aborted as soon as fewer remain -- failing on their way to guiding, **or dropping out of
+  guiding during the spectrograph's exposure**, which 5.7 and 10 had left out of scope. A
+  guiding unit drops out when its guider is no longer engaged (a lost star still being sought,
+  PHD2 `LostLock`, does not count) or it is unreachable for 30 s; the exposure is then aborted
+  with the plan and every unit stopped.
+- **`spec_assignment` is `spec`** (decided 2026-10-25): `[spec]` in plan files, `Plan.spec` in
+  code. The sections below keep the old name. The rewrite tool renames it in existing files.
+- **A plan with no spectrograph `instrument` only acquires**, whether `[spec]` is left out or
+  written without one.
+- **The plan token, control's single abort, and how plans end** are 6.6, added 2026-10-26.
+  They supersede 5.5's "workers still running at success keep running" for acquisitions,
+  5.7's "the engine does not stop the exposure", 7.1 step 2 (start_acquisition no longer
+  aborts a previous acquisition; it refuses), and 7.3 (`abort_acquisition`, gone).
+- **Every unit producer writes a `plan_id` file** (and the spectrograph a `batch_id` file for a
+  batch) into each products folder it creates (5.10).
+- **The unit starts itself up** (decided 2026-11-04). `focus_on_star` and
+  `start_acquisition_and_guiding` declare `autostartup` (MAST_common#221, MAST_unit#395): the
+  unit starts up, or joins a startup already running, waits up to `seconds_to_autostartup`
+  (120 s), and refuses with its `why_not_operational` unless it is operational or only
+  cooling (`operational_but_for_cooling`). 5.4 steps 1 and 2 are therefore the unit's and
+  are gone from control (MAST_control#53, #54), with `STARTING_UP`, `unit-starting-up`,
+  `Timing.startup_seconds` and the `startup:` / `operational:` prefixes. Step 3, busy, stays:
+  nothing on the unit refuses those routes for being busy. Those two PUTs get a 150 s HTTP
+  timeout (`Timing.autostartup_call_seconds`), above the unit's wait.
 
 ## 1. Why
 
@@ -44,7 +93,10 @@ spectrograph.
   `production = false` (an engineering acquisition, not science). Appendix A shows one.
 - **Every unit's transitions are events in the plan file**, not only the plan's outcome,
   so the file says which units made the quorum and why the others did not.
-- **The engine creates the plan's run folder**, for every plan.
+- **Every execution gets a products folder**, `plans/products/PLAN_<ulid>/<YYYY-MM-DD_HH-MM-SS>/`
+  on the share, with a folder per stage (`Autofocus/`, `Acquisition/`, `Spec/`). Producers keep
+  writing their own sequence-numbered folders; they tell control where, and control links them
+  in (5.10). It replaces the run folder.
 - **Plan files carry no empty tables.**
 - **`requested_units` may not be empty.** It names the units, or is `"any"`: the plan
   does not care which units it gets. `"any"` is independent of the spectrograph -- every
@@ -192,7 +244,9 @@ and `timings` as pydantic fields, hidden from the UI and excluded by hand when t
 written (`submit_plan`, `planning.py:409`). They move to `PlanExecution` (section 5.2), and
 so do `probe`, `dispatch`, `wait_for_guiding`, `expose`, `wait_for_spec_done`, `terminate`,
 `abort`, `fetch_statuses` and `api_coroutine`. `Plan` keeps the fields, the validators,
-`from_toml_file` and `add_event`.
+`from_toml_file` and `add_event`. `run_folder` goes too: no plan ever had one (4.1 #9), and
+an execution's products folder is recorded in its `executing` event instead (5.9), since a
+revived plan runs, and has products, more than once.
 
 ### 3.4 Writing a plan file: `plan_to_toml`
 
@@ -288,22 +342,26 @@ field, shown in the GUI as "Name"), or both. **Precedence, the same as the unit'
    name; coordinates supplied but unusable and no name; or a name that did not resolve.
    A name that fails to resolve never falls through to anything.
 
-**`parse_target` gains the name** and stays the one place the rule lives:
+**`target_coordinates`** (`common/parsers.py`, beside `parse_target`) is the one place the
+rule lives:
 
 ```python
-def parse_target(
+def target_coordinates(
     ra_j2000_hours: str | float | None,
     dec_j2000_degs: str | float | None,
     object_name: str | None = None,
-    resolve_timeout: float = TOTAL_TIMEOUT_SECONDS,
+    resolve_timeout: float | None = None,     # TOTAL_TIMEOUT_SECONDS
 ) -> tuple[float | None, float | None, ResolvedObject | None]:
     """(ra, dec, None) when the coordinates were used as given; (ra, dec, resolved) when the
-    name was resolved; raises ValueError (ObjectNameError for a name) otherwise."""
+    name was resolved; (None, None, None) when nothing was given; ObjectNameError for a
+    name that did not resolve, ValueError for coordinates given but unusable."""
 ```
 
-Without a name it behaves as today, so existing callers are unchanged. The unit's
-`_target_coordinates` keeps only its rule 3 -- the mount's current position, which only the
-unit has -- on top of `parse_target`, instead of its own copy of rules 1 and 2.
+`parse_target` is unchanged: it converts whatever it is given, and its callers unpack two
+values. (This section first had `parse_target` itself gain the name; MAST_common#202 put the
+rule beside it instead.) The unit's `_target_coordinates` keeps only its rule 3 -- the
+mount's current position, which only the unit has -- on top of `target_coordinates`
+(MAST_unit#365), instead of its own copy of rules 1 and 2.
 
 **Resolution happens once, when a plan is written, never when it is loaded.** Plans are
 loaded constantly -- every folder refresh, every scrape, every GUI listing -- and a
@@ -313,7 +371,7 @@ validator that resolved would put up to 15 s of network on each. So:
   `ra_hours` / `dec_degrees` stay required in the model.
 - **`resolve_target(target: dict) -> tuple[dict, EventModel | None]`** in
   `models/targets.py` runs on the raw dict before the `Plan` is built: it applies
-  `parse_target` with `target.get("name")`, writes the decimal coordinates into the dict,
+  `target_coordinates` with `target.get("name")`, writes the decimal coordinates into the dict,
   and returns the `resolved` event when it resolved. Every path that writes a plan calls
   it: `submit_plan`, `start_acquisition` (7.1) and the rewrite tool (3.5).
 - **The file then carries the coordinates**, so every later load meets rule 1 and never
@@ -365,8 +423,9 @@ So nothing that works today is lost by replacing it.
 ### 4.2 What it does that is kept
 
 The single `Controller.in_progress` slot; the plan-folder state machine and its file moves;
-`EventModel` events appended to the TOML; `timeout_to_guiding`; quorum; the run folder
-and the `AssignmentNotification` symlinks of the products (section 6.5).
+`EventModel` events appended to the TOML; `timeout_to_guiding`; quorum; and the
+`AssignmentNotification` symlinks of the products, now into the execution's products folder
+rather than a run folder (5.10, 6.5).
 
 ## 5. The engine (MAST_control)
 
@@ -384,7 +443,7 @@ model for scheduling.
 
 ```python
 class UnitRunState(StrEnum):
-    PENDING, STARTING_UP, FOCUSING, ACQUIRING, GUIDING, FAILED, ABORTED
+    PENDING, FOCUSING, ACQUIRING, GUIDING, FAILED, ABORTED     # STARTING_UP gone (As built)
 
 @dataclass
 class UnitRun:
@@ -396,16 +455,15 @@ class PlanExecution:
     plan: Plan
     toml_path: Path                 # follows the file through every move (4.1 #8)
     file_lock: Lock                 # every read-modify-write of the plan file
-    run_folder: Path
+    products: PlanProducts          # 5.10
     units: dict[str, UnitRun]
     cancelled: Event
     outcome: Literal["running", "completed", "failed", "aborted"]
 ```
 
-**The run folder.** At start the execution calls `PathMaker.make_run_folder()`
-(`<shared>/runs/<observing-night>/run-<NNNN>`), sets `plan.run_folder`, and records it with
-the `executing` event (5.9). The unit product notifications are symlinked under it,
-`<run_folder>/<unit>/<shared_subpath>`, as `_handle_assignment_notification` already does.
+**The products folder.** At start the execution creates its `PlanProducts` (5.10) and
+records the folder with the `executing` event (5.9). Product notifications are linked into it
+as they arrive.
 
 **The file lock.** `add_event` reads, edits and rewrites the whole TOML, and with one
 thread per unit two units can finish at once. Every event write and every move of the file
@@ -440,8 +498,6 @@ appends an error prefixed with its step and sets `FAILED`:
 
 | Prefix | The unit stopped |
 | --- | --- |
-| `startup:` | starting up, or in an opstate it cannot start from |
-| `operational:` | not operational, for a reason other than cooling |
 | `busy:` | busy with something other than this plan |
 | `focus_on_star:` | in `focus_on_star` |
 | `acquisition:` | in the acquisition phases, before the handover to the guider |
@@ -454,15 +510,17 @@ means control could not ask, so the unit's own state is unknown, and it says so.
 **Unreachable.** A failed status poll is retried; a unit unreachable for **30 s** in a row
 fails with `"status: unreachable for 30 s"`. A shorter outage only delays the step it is in.
 
-1. **Opstate.** `initialized` or `shutdown`: `PUT startup`, `STARTING_UP`, wait for
-   `opstate == startedup` (600 s). `startedup`: go on. `None`: fail, "status: opstate not
-   reported". Anything else: fail, "startup: opstate is `<x>`".
-2. **Operational.** Go on if `operational`, or if `why_not_operational` is non-empty and every
-   entry starts with `COOLING_DOWN_REASON`. Otherwise fail with the reasons; an empty list
-   with `operational == False` fails with "not operational, no reason given".
-3. **Busy.** `why_busy == {}`: go on. `None`: fail, "status: busy state not reported". Non-empty:
-   fail, `"busy: <owner>: <flags>; ..."`. (`CoolingDown` is not in `why_busy`, so a unit
-   that is only cooling passes both 2 and 3.)
+1. **Opstate** -- *the unit's since 2026-11-04 (As built).* Control sends no `startup`; the
+   PUTs of steps 4 and 5 start the unit up. Control still fails "status: opstate not
+   reported" when `opstate` is `None`.
+2. **Operational** -- *the unit's since 2026-11-04.* The same rule, `operational_but_for_cooling`,
+   is the unit's autostartup gate; its refusal fails the unit as `focus_on_star:` or
+   `acquisition:`, in the unit's words.
+3. **Busy** (`_not_busy`). Another plan's `plan_id`: fail, `"busy: working on plan <ulid>"`,
+   whatever the opstate. Not `startedup`: go on -- `why_busy` is unknown (`None`) outside
+   STARTED_UP, and the unit is doing nothing. Otherwise `why_busy == {}` (this plan's own
+   `ExecutingPlan` excepted): go on. `None`: fail, "status: busy state not reported".
+   Non-empty: fail, `"busy: <owner>: <flags>; ..."`. (`CoolingDown` is not in `why_busy`.)
 4. **`focus_on_star`**, if `plan.autofocus`. `PUT focus_on_star` with `zenith=false`, the
    coordinates and `plan_ulid`; set `FOCUSING`. Errors from the PUT fail the unit. Poll
    `focus_on_star_status` until `active == False` (600 s). `outcome == "solved"`: go on.
@@ -544,8 +602,7 @@ plan's log even if control dies mid-run.
 | --- | --- | --- |
 | `generated` | `start_acquisition` wrote the plan (7.1) | the request, coordinates as typed |
 | `resolved` | a name was resolved when the plan was written (3.8) | `<name> -> ra=... dec=... via <service>`, the canonical name |
-| `executing` | the execution started | `run_folder: <path>`, `units: [...]`, `quorum: <n>` |
-| `unit-starting-up` | a worker sent `startup` | `<unit>` |
+| `executing` | the execution started | `products: <path>`, `units: [...]`, `quorum: <n>` |
 | `unit-focusing` | a worker sent `focus_on_star` | `<unit>` |
 | `unit-acquiring` | a worker sent `start_acquisition_and_guiding` | `<unit>` |
 | `unit-guiding` | a unit reached `GUIDING` | `<unit>` |
@@ -556,6 +613,95 @@ plan's log even if control dies mid-run.
 | `completed` / `failed` / `aborted` | terminate (5.8) | the quorum line, then `failed: <units>` |
 
 A `unit-*` event is written on the state change only, never per poll.
+
+### 5.10 Plan products
+
+Each execution has one folder on the share for what the plan produced, and links into it
+what every stage wrote. Producers do not change how they store their products: a unit still
+writes `<night>/Acquisitions/seq=0007,...` under its own folder, the spectrograph its
+`<night>/highspec/acquisition-0003`, each with its own sequence numbers, moved from the RAM
+disk to the share as today.
+
+**Where.** `share_root/plans/products/PLAN_<ulid>/<execution>/`:
+
+- under `plans/`, beside the state folders (`pending/`, `in-progress/`, ...) and `files/`,
+  in its own `products/`. Not a `Plans/` beside `plans/`: those are two folders on control,
+  but one for the units and the GUI host, which see the share through Samba, case-blind;
+- `PLAN_<ulid>`, the stem of the plan's file;
+- `<execution>` is the UTC start, `YYYY-MM-DD_HH-MM-SS` (no colons: Windows clients read this
+  folder too). A revived plan runs again under the same ULID, and each run gets its own
+  folder. Two starts in the same second: the second gets `_2`.
+
+**Layout.** A folder per stage, a folder per producer, and one link per product folder,
+named after it (targets shown from the share root):
+
+```text
+plans/products/PLAN_01JAD8Q4ZK7V3M2XG9T6R5N0HB/2026-10-19_19-42-07/
+  Autofocus/mast01/0003                        -> mast01/2026-10-19/FocusOnStar/0003
+  Acquisition/mast01/seq=0007,time=19-45-02... -> mast01/2026-10-19/Acquisitions/seq=0007,...
+  Spec/highspec/acquisition-0003               -> mast-ns-spec/2026-10-19/highspec/acquisition-0003
+```
+
+The producer is the unit's name, or the instrument's for `Spec`. The link is named after its
+target, so a stage that runs twice for one producer gives two links, not a collision.
+
+**Every product folder says its plan.** A producer given a plan's ULID -- the unit's
+`focus_on_star` and `start_acquisition_and_guiding`, the spectrograph's assignment -- writes a
+file named `plan_id`, holding the ULID, into each products folder it creates, as soon as it
+creates it. Written under `protect`, so it is a product: it goes to the share with the rest
+and is never discarded as scratch. The folder then names its plan wherever it is found,
+without control's links -- on the share, on a fallback, or left on a RAM disk. One helper,
+`write_plan_id_file(folder, plan_ulid)` in `models/plans.py` (MAST_common#202), beside
+`PLAN_ID_FILE = "plan_id"`. A batch's folders are labelled the same way, in a file of their
+own: `batch_id`, with the batch's ULID (`write_batch_id_file`, `BATCH_ID_FILE`). The
+spectrograph writes `plan_id` for an assignment carrying a plan and `batch_id` for one
+carrying a batch.
+
+**Who links.** Control. The units and the spectrograph are Windows machines that reach the
+share over SMB, where they cannot create symlinks; control runs on the machine that serves
+it. A producer sends an `AssignmentNotification` when it **creates** its folder, carrying the
+plan's ULID, the stage, and the folder relative to its own folder on the share (6.5). Control
+joins `share_root/<producer's hostname>/<shared_top>` and links it into the folder of the
+execution in progress for that ULID; a notification for a ULID not in progress is logged and
+dropped.
+
+- **Relative links** (`../../../../../../mast01/...`), so they resolve both on control and
+  through the share. An absolute `/Storage/...` target resolves on control only.
+- **A link may come before its target.** Products reach the share after the RAM-to-share
+  move, possibly through the share's fallback (filing areas). A missing target is logged at
+  INFO, not as a warning: it is the normal order of events.
+- **Producers need only the ULID.** There is one execution in progress, so the execution
+  folder never travels.
+
+**`PlanProducts`** (MAST_common, `models/plans.py`):
+
+```python
+class PlanStage(StrEnum):
+    Autofocus = "Autofocus"       # focus_on_star
+    Acquisition = "Acquisition"   # start_acquisition_and_guiding, its plate solves included
+    Spec = "Spec"                 # the spectrograph's exposures
+
+@dataclass(frozen=True)
+class PlanProducts:
+    plan_ulid: str
+    execution: str                                   # "2026-10-19_19-42-07"
+
+    @classmethod
+    def start(cls, plan_ulid: str, now: datetime) -> "PlanProducts":
+        """Name the execution and create its folder."""
+    @property
+    def root(self) -> Path:                          # share_root/plans/products/PLAN_<ulid>/<execution>
+    def folder_for(self, stage: PlanStage, producer: str) -> Path:
+    def link(self, stage: PlanStage, producer: str, target: Path) -> Path:
+        """Create the relative link `<folder_for>/<target.name>`; idempotent."""
+```
+
+`PathMaker.make_plan_products_folder()` gives `share_root/plans/products`, next to
+`make_plans_folder()`. The never-called `PathMaker.make_run_folder()` and the `runs/` folder
+go.
+
+At terminate (5.8) the plan's TOML, as it then stands, is copied into the execution folder,
+so the folder says what it was the products of.
 
 ## 6. MAST_unit
 
@@ -608,17 +754,74 @@ The acquirer's `while ... Guiding` loop exits at once, the mount stops tracking,
 `endpoint_execute_assignment`, `do_execute_assignment` and the unreferenced
 `start_acquisition_and_guiding_for_assignment` are removed. What they did that the engine
 still needs is the `AssignmentNotification` telling control where the products are, so
-control can symlink them into the plan's run folder. It moves to the endpoints the workers
-call:
+control can link them into the execution's products folder (5.10). It moves to the
+endpoints the workers call:
 
 - `start_acquisition_and_guiding` and `focus_on_star` take an optional `plan_ulid: str |
-  None = None`. When it is set, the unit sends the `in-progress` notification with the
-  acquisition folder (`shared_subpath="acquisition"`) or the focus_on_star run folder
-  (`shared_subpath="focus_on_star"`), relative to the shared root, as today.
-- An operator calling them by hand passes no `plan_ulid` and nothing is sent.
+  None = None`. When it is set, as soon as the unit has created its folder it writes the
+  `plan_id` file there (5.10) and sends the `in-progress` notification: `stage=PlanStage.Acquisition` with the acquisition folder, or
+  `stage=PlanStage.Autofocus` with the focus_on_star run folder, in `shared_top` relative to
+  its folder on the share, as today.
+- An operator calling them by hand passes no `plan_ulid`, and nothing is written or sent.
+
+**`AssignmentNotification.stage: PlanStage | None = None`** is added in MAST_common. The
+spectrograph does not need to change: a notification without `stage` is placed by its
+`shared_subpath`, which today's producers already send -- `"acquisition"` to `Acquisition`,
+`"focus_on_star"` and `"autofocus"` to `Autofocus`, `"highspec"` and `"deepspec"` to `Spec`
+with the instrument as the producer. Any other value is logged and not linked.
 
 `UnitAssignment` is then no longer received by any unit; whether it stays in common is
 decided with the spectrograph's `SpectrographAssignment`, which still uses it.
+
+### 6.6 The plan token: one plan, one owner, one abort (decided 2026-10-26)
+
+**Control is the single authority on plans.** It executes one workload -- a plan or a
+batch -- at a time, starts and ends it, and coordinates it across the units and the
+spectrograph. It hands each participant only a **token**, the plan's ULID as `plan_id`, so
+that they can report back under it.
+
+- **The token travels as a query parameter**, `plan_id`, on every request control sends on a
+  plan's behalf: `focus_on_star` and `start_acquisition_and_guiding` on a unit,
+  `execute_assignment` on the spectrograph. Hidden from OpenAPI: it is control's, not an
+  operator's. A participant also writes it into each products folder it makes (`plan_id`,
+  5.10).
+- **The first accepted request carrying a token makes the participant the plan's**:
+  `UnitActivities.ExecutingPlan` / `SpecActivities.ExecutingPlan` (the spectrograph's is
+  `common.spec`'s enum) is raised and the token kept as `plan_id`, reported in status. Start-up
+  is not part of a plan, and carries no token.
+- **While it is the plan's, it refuses any state-changing request that does not carry the same
+  token**: "already working on plan X". `GET` and `abort` always pass. One middleware,
+  `common.plan_token`, on the unit and the spectrograph, covering every route. `ExecutingPlan`
+  keeps the unit busy (`why_busy`), so it never idles out mid-plan.
+- **Nothing switches a participant between plans.** Only an `abort` releases it: at the end of
+  `abort`, after every specific activity was asked to stop, `ExecutingPlan` ends and `plan_id`
+  is cleared. Before a plan starts, control reads every requested unit's `plan_id` and refuses
+  the request if one works for another plan ("mast01: working on plan X; abort it first") --
+  before any plan file is written.
+- **Control has one `PUT /abort`**: it aborts the workload in progress through every
+  participant's own `abort`. `abort_acquisition` and `/plans/cancel` are gone.
+
+**How a plan ends:**
+
+- **A science plan**: the spectrograph is its last actor. Once it has made the plan's products
+  it ends its own `ExecutingPlan` and sends an `AssignmentNotification(state="completed",
+  stage=Spec)` -- or `"failed"` with its errors. Control's handler hands that to the execution,
+  which aborts every unit and completes (or fails) the plan. Backstops for a notification
+  that never arrives: a spectrograph whose status no longer carries the token is done; one
+  silent past its exposure series plus `spec_margin_seconds` has failed.
+- **An acquisition-only plan** (no spectrograph `instrument`): once its quorum is guiding it
+  records `quorum-reached` and **stays control's workload** -- its units keep working for it --
+  until `abort`, after which it is `completed`, since it achieved its goal. An abort before the
+  quorum is `aborted` (`canceled/`).
+- **Either fails** as soon as fewer than `quorum` units remain -- failing on their way to
+  guiding, or a guiding one dropping out (guider no longer engaged; a lost star still being
+  sought, PHD2 `LostLock`, does not count; or unreachable for 30 s). Control then aborts every
+  unit, guiding ones included, and the spectrograph if it is still at it.
+- A plan records its end only once its abort has told every participant.
+
+**Assignment notifications are a handshake** (MAST_common#205): the sender keeps one until
+control answers `ok`, which it does once it has acted on it or deliberately ignored it, and
+errors only for what a resend might fix; control's handlers are idempotent.
 
 ## 7. The acquisition endpoints (MAST_control)
 
@@ -739,10 +942,15 @@ Aborts the current execution (5.8). No current execution: error `"no acquisition
   covered in common at the baseline).
 - `Target`: `ra_hours = 12.5125` and `"12:30:45"` load to the same value; an RA of
   `187.6875` (degrees) and a Dec of `91` are refused.
-- `parse_target` with a name: both coordinates valid -> used, the name not resolved (no
+- `target_coordinates`: both coordinates valid -> used, the name not resolved (no
   network call); one coordinate missing or unusable -> the name resolved; no name -> as
   today; a name that does not resolve -> `ObjectNameError`, never a fallback. The resolver is
   stubbed: no network in tests.
+- `PlanProducts.start`: the folder is `plans/products/PLAN_<ulid>/<YYYY-MM-DD_HH-MM-SS>`, and a
+  second start in the same second gets `_2`; `link` makes a relative link named after its
+  target, resolving from the share root, and a second call is a no-op; a target that does not
+  exist yet still gets its link. On a temporary share root.
+- `AssignmentNotification` without `stage` still parses.
 - `resolve_target` writes the coordinates into the dict and returns the `resolved` event;
   unusable coordinates plus a name give the "coordinates unusable" detail first.
 - `Target` never resolves: a name without coordinates fails validation on load.
@@ -759,7 +967,8 @@ of them reported and untouched; `--dry-run` writes nothing; every output loads.
 - Idleness reads `is_engaged`: a unit in `LostLock` is not idle.
 - Stop/abort reads `is_engaged`: a unit in `LostLock` is told to stop.
 - A refused `start_guiding` ends `FAILED` with the guider's errors.
-- `plan_ulid` sends the notification; no `plan_ulid` sends none.
+- `plan_ulid` writes `plan_id` into the folder and sends the notification, with its stage,
+  once the folder exists; no `plan_ulid` does neither.
 
 **MAST_control** (a fake `UnitApi` scripted per unit, injectable poll interval and
 timeouts, no network, no sleeps)
@@ -784,8 +993,10 @@ timeouts, no network, no sleeps)
   `completed/` with its events; `toml_path` follows the move.
 - Every unit transition writes one event; polls write none; two workers finishing at once
   both land in the file (the lock).
-- The execution creates the run folder and records it; a product notification is
-  symlinked under it.
+- The execution creates its products folder and records it in `executing`; a notification
+  with a stage is linked under `<Stage>/<unit>/`; one without is placed by its
+  `shared_subpath`, `highspec` under `Spec/highspec/`; an unknown subpath, or a ULID not in
+  progress, is logged and not linked; the plan's TOML is copied in at terminate.
 - `plan_to_toml` drops `[target.science]` when empty, keeps `scheduled_units = []`, keeps
   `merit = 1`.
 - `start_acquisition` over an acquisition aborts it; over a spectrograph plan refuses.
@@ -801,11 +1012,14 @@ Deployment moves by pin bumps in MAST_provisioning `tools/mast-repos.tsv`. `comm
 row, shared by the unit, control and spec roles, so a common bump reaches every machine.
 
 1. **Additive, common + unit together.** common: `AcquisitionOutcome`,
-   `COOLING_DOWN_REASON`, `parse_target`'s `object_name` (3.8). unit: 6.1-6.5, its own
-   `parse_target` replaced by common's, and `_target_coordinates` built on it.
+   `COOLING_DOWN_REASON`, `target_coordinates` (3.8). unit: 6.1-6.5, and
+   `_target_coordinates` built on `target_coordinates`. common also
+   gets `PlanStage` and `AssignmentNotification.stage` here, additive, for 6.5; `PlanProducts`
+   waits for step 2.
    Nothing in common's plan model changes yet, so control and spec are unaffected.
    Removing `execute_assignment` is safe: control's plan path cannot reach it (4.1 #1).
-2. **The model and the engine, together, on control.** common: 3.1-3.4, `resolve_target`. control: the
+2. **The model and the engine, together, on control.** common: 3.1-3.4, `resolve_target`,
+   `PlanProducts` and `AssignmentNotification.stage` (5.10). control: the
    engine, the endpoints, `NewPlanTemplate`. gui: the plan forms (the moved exposure
    fields, no `required_units`, `"any"` as a unit choice), the unit filter on
    `requested_units`, `ScrapingResults.known_units`, and `plan_new.js` / `plan_view.js`
@@ -865,14 +1079,13 @@ details = ["start_acquisition", "ra=12:30:45", "dec=+20:15:00"]
 when = "2026-10-19T19:42:07.311204+00:00"
 ```
 
-The same file in `completed/`. The execution added `run_folder` when it started, and the
-events as they happened (5.9). mast05 failed its operational check; mast01 and mast03 focused,
+The same file in `completed/`, and a copy of it in the products folder. The execution
+added the events as they happened (5.9). mast05 failed its operational check; mast01 and mast03 focused,
 acquired and reached guiding, and the second of them made the quorum.
 
 ```toml
 ulid = "01JAD8Q4ZK7V3M2XG9T6R5N0HB"
 # ... as above ...
-run_folder = "/Storage/mast-share/MAST/runs/2026-10-19/run-0007"
 
 # [target] ... as above ...
 
@@ -883,7 +1096,7 @@ when = "2026-10-19T19:42:07.311204+00:00"
 
 [[events]]
 what = "executing"
-details = ["run_folder: /Storage/mast-share/MAST/runs/2026-10-19/run-0007", "units: mast01, mast03, mast05", "quorum: 2"]
+details = ["products: /Storage/mast-share/MAST/plans/products/PLAN_01JAD8Q4ZK7V3M2XG9T6R5N0HB/2026-10-19_19-42-07", "units: mast01, mast03, mast05", "quorum: 2"]
 when = "2026-10-19T19:42:07.402113+00:00"
 
 [[events]]
@@ -927,5 +1140,7 @@ details = ["quorum reached: 2 of 3 guiding (mast01, mast03)", "failed: mast05"]
 when = "2026-10-19T19:48:30.561337+00:00"
 ```
 
-The products are linked under the run folder as the units report them:
-`run-0007/mast01/focus_on_star`, `run-0007/mast01/acquisition`, and the same for mast03.
+The products are linked into
+`plans/products/PLAN_01JAD8Q4ZK7V3M2XG9T6R5N0HB/2026-10-19_19-42-07/` as the units report them:
+`Autofocus/mast01/<run>`, `Acquisition/mast01/seq=...`, and the same for mast03. mast05
+produced nothing, so it has no folder.

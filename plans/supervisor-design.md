@@ -207,7 +207,7 @@ STARTING → WAITING_FOR_RESOURCES → LOADING_CONFIG → SUPERVISING → LAUNCH
 | resource | probe | "available" means |
 |---|---|---|
 | network | `gethostbyname(controller_host.domain)`, then `create_connection((fqdn, mongo_port), 2s)` | both succeed |
-| RAM disk + indexes | `is_windows_drive_mapped("D:")` → `is_accessible(index_dir, 2.0)` → every `index-5206-{00..46}.fits` present **and non-empty** | drive mapped, dir present; missing indexes are **amber, not fatal** |
+| RAM disk + indexes (unit only) | `is_windows_drive_mapped("D:")` → `is_accessible(index_dir, 2.0)` → the folder equal, by name and size, to provisioning's `C:\MAST\state\mast-indexes.json` (MAST_provisioning#254; no file, as on mast00 and mastw: not checked) | drive mapped, dir present; a differing index set is **amber, not fatal** |
 | mast-share | `Filer().ensure_shared_root()` ([filer.py:143-181](../../common/filer.py#L143)) | it returns True |
 
 Reuse the existing probes; do not write new ones. `is_accessible`
@@ -560,17 +560,26 @@ A predecessor in another login session is killed like one in this session: §6's
 covers the programs a supervisor runs, not another supervisor. The snapshot carries its heartbeat
 interval so "fresh" is judged against the interval in force, not the default.
 
+**The action listener is claimed the same way, and is just as required** (decided 2026-10-22).
+`SUPERVISOR_ACTIONS_PORT` (8005, on `127.0.0.1`) is claimed right after the status port, by the
+same routine and the same rules; a supervisor that cannot have either does not start, and closes
+whatever it had claimed. It serves `/status` too, so a successor reads either port's holder alike,
+and on stop it closes first, so a successor that finds 8004 free finds 8005 free too. A spec
+supervisor claims it as well, with no action route on it.
+
 **Read-only, and the binding enforces it.** §13's boundary — *the supervisor is a console at the
 telescope, not a remote-control surface* — survives a read-only endpoint intact. But `/status` is
 exactly where someone will later want `POST /opmode`, and §13's argument applies to an HTTP verb
 identically: a physical event must not be the silent consequence of someone saving a form. So
-**the read route binds `0.0.0.0` and any future action route binds `127.0.0.1` only** — status
-readable fleet-wide, the two operator verbs physically-present-only. That makes the boundary
+**the read route binds `0.0.0.0` and every action route binds `127.0.0.1` only**, on its own
+listener — status readable fleet-wide, the operator verbs and `PUT /ramdisk/restart`
+(filing-areas-design §8.1) physically-present-only. That makes the boundary
 mechanical rather than a convention, and it closes the door before anyone opens it. Say so in
 `api.py`'s module docstring.
 
-No `ApiDomain.Supervisor` and no `SupervisorApi(BaseApi)` yet — that is a client with no caller.
-Add them when MAST_gui or the controller actually polls.
+No `ApiDomain.Supervisor` and no `BaseApi` client for `/status` yet — that is a client with no
+caller. Add them when MAST_gui or the controller actually polls. (`common/api.py`'s
+`SupervisorApi` is the loopback client for the action routes only, used by `Filer`.)
 
 Two consequences to state rather than discover. Restart-to-apply (§7) drops the port for about
 ten seconds, and from outside `ECONNREFUSED` is indistinguishable from a dead machine; nothing to
@@ -662,8 +671,8 @@ to `UnitConfig` and `SpecsConfig`. **Every field defaulted** — `get_unit()` me
 unit in the fleet at once.
 
 Sections: `processes: dict[str, ManagedProcessConfig]` (enabled, exe, args, port, intervals,
-thresholds, crash-loop window), `resources` (wait budget, probe intervals, `index_dir`,
-`index_series`, `index_count`), `app` (package_dir, entry, grace, restart), `vscode` (exe,
+thresholds, crash-loop window), `resources` (wait budget, probe intervals, `index_dir`; `index_series` and `index_count`
+are unread since MAST_supervision#21: the set is provisioning's manifest), `app` (package_dir, entry, grace, restart), `vscode` (exe,
 workspace), `gui` (buffer sizes, drain interval, level), `heartbeat_interval_seconds` (300),
 `stop_grace_seconds`. Observe
 `common/CLAUDE.md:216` — one `json_schema_extra` entry per line, tooltips never wrapped.
@@ -814,8 +823,9 @@ telescope, not a remote-control surface.
 - **Does not make PWI4 stateful-recoverable.** After a PWI4 restart the mount connection is
   lost; reconnecting runs `mount_enable()` and is a hardware verb owned by the unit's lifecycle,
   not by a supervisor. It is reported, not acted on.
-- **Does not mount the ImDisk or copy the indexes.** Nothing in either repo does; that stays
-  with provisioning. The supervisor only checks and reports.
+- **Does not mount the ImDisk at boot or copy the indexes.** That stays with provisioning. It
+  does revive a lost `D:`, by running provisioning's SYSTEM task `\mast-ramdisk-restart`
+  (filing-areas-design §8, amended 2026-10-22).
 
 ## 15. Staging
 
