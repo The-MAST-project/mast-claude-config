@@ -16,6 +16,7 @@ in-progress or machine-local notes stay in each developer's local `~/.claude` me
 - [`Mount.is_moving` is a tracking-quality signal, not a motion one](mount-is-moving-is-a-slew-detector.md) — MAST_unit; PWI4 rms thresholds mirror the GUI, so in wind it reads True while parked on target and `while mount.is_moving` stalls
 
 ## Feedback
+- [Operational how-tos live in the MAST wiki](feedback_wiki_how_tos.md) — code points at its page; changing covered code means editing the page in the same work (`/wiki-sweep` before a PR); the wiki is public
 - [Comment out, don't delete, when disabling temporarily](feedback_comment_dont_delete.md) — preserves position for re-enablement
 - [Never run git writes/pushes unprompted](feedback_no_unprompted_git_writes.md) — no commit/push/rm/reset/rebase/tag without an explicit request in the current turn; read-only git is fine
 - [Throwaway tests live outside module trees](feedback_throwaway_tests_outside_modules.md) — one-off assessments get a fresh top-level dir; never nest in a source module
