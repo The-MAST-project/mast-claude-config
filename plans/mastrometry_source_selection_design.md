@@ -2,8 +2,8 @@
 
 Nov 16, 2026 · Arie Blumenzweig
 
-> **Status: plan only — not implemented; every number is from simulation (rev. 2026-11-16).**
-> Nothing in `MAST_unit` changes until the survey (Test plan, Step 0) and the residual maps
+> **Status: Stage 0 built (MAST_unit PR #409, `source_selection.py` + `tools/source_survey.py`, incl. `--solve`); not yet run on real frames. Stages 1-5 not started. Every number is from simulation (rev. 2026-11-17).**
+> Nothing in the solver path of `MAST_unit` changes until the survey (Test plan, Step 0) and the residual maps
 > (Step 1) have been run on real frames. The flag `solving.source_selection` defaults to `off`.
 >
 > **Also read:** `inhouse_guiding_design.md` §11, which asks the same questions of the
@@ -381,7 +381,7 @@ From `src/solvers/CLAUDE.md` and `COORDINATE_SURFACE.md` in `MAST_unit`:
 
 **Simulation assumptions**
 
-- **Optics.** An uncorrected paraboloid, as the code describes it: 61 cm, f/3, third-order coma only. If MAST has a corrector, the coma numbers shrink, but the centroid-method argument still holds.
+- **Optics.** An uncorrected paraboloid, as the code describes it: 61 cm, f/3, third-order coma only. MAST has no field corrector (confirmed 2026-11-17), so the coma numbers apply at full strength; the survey should check measured FWHM-versus-radius against this model and tune `--low-coma-radius` if it is off.
 - **Seeing and pixels.** A Moffat PSF (β = 3), 2″ FWHM, at 0.2616″/px.
 - **Noise.** Sky-limited Gaussian noise at 1 per pixel; fluxes from 300 to 100,000 counts.
 - **Fit.** An ordinary least-squares polynomial (SIP-like), with 3σ clipping where stated. astrometry.net's tweak may weight or reject sources differently.
