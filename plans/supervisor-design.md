@@ -7,16 +7,18 @@
 > snapshot: a small GUI with a rolling log, a five-minute heartbeat in the log file, and
 > `GET /status` on port 8004.
 >
-> **Status: stages 0–3 built, except the window's Actions menu; stage 5 code merged, not yet
-> deployed** — MAST_supervision #24–#30, MAST_provisioning #261 and #262, MAST_common #229. The
-> clone manifest still pins supervision at `395f7f8`, before stage 5, so no unit runs
-> `mast-service` until that pin moves. What is not built is marked so where it is described.
+> **Status: stages 0–3 built, except the window's controls — the Actions menu, the per-row
+> restart buttons and the crash-loop "retry now" (marked where described); stage 5 code merged,
+> not yet deployed** — MAST_supervision #24–#30, MAST_provisioning #261, #262 and #264, MAST_common #229.
+> The clone manifest pins supervision at `51c369c`, stage 5's head (MAST_provisioning#264), but
+> a unit runs `mast-service` only once it is flagged `supervised` in the registry and
+> provisioned. What is not built is marked so where it is described.
 > Design questions closed but one — what maintenance does on the machine, reopened by the
 > predecessor record (see the 2026-09-24 provenance round).
 > Code home: the **MAST_supervision** repo (§2), with its shared building blocks in MAST_common.
 > Depends on `claude/plans/opmode-design.md` stage 1. Code baseline: MAST_common `master`
 > @ `5dfd263`, MAST_unit `main`, 2026-09-16; revised 2026-09-22 and 2026-09-24; revised
-> 2026-11-17 against MAST_supervision `main` @ `51c369c` and MAST_provisioning `main` @ `55b619e`.
+> 2026-11-17 against MAST_supervision `main` @ `51c369c` and MAST_provisioning `main` @ `8c9c822`.
 
 ## Context
 
@@ -968,7 +970,7 @@ telescope, not a remote-control surface.
 | 2 | supervision | `state.py`, resources, probes, managed, launcher, locate, logsink, gui_model + every test. `--dry-run` prints the resolved plan and exits |
 | 3 | supervision | `api.py` and the status endpoint; gui (incl. the Actions menu and its modals — not yet built; the window is read-only), supervisor, `__main__`. **Run a night on mast00** as `--no-service --no-app`, supervising PWI4/ps3cli and observing PHD2 while the operator runs the app from VSCode — adoption is what makes two owners safe, and this is the highest-value de-risking step |
 | 4 | prov. | autologon on mast00 and mastw — dropped, both being excluded from provisioning (§12); nssm at a managed path; write `<top>/mast-<role>.code-workspace`; the superseding service decision (§3, §12) — done, MAST_provisioning#262 |
-| 5 | supervision, prov. | **Code merged**: the teardown (MAST_supervision#24), session (#25), service (#29), installer (#28), the supervisor's `--service` (#30). **Installed through provisioning on supervised units**: the registry's `supervised` flag (`StrictBool` or `None`, absent read as false; MAST_provisioning#261); the `mast-service` provider (order 2220) runs the installer on a supervised unit and removes the service on any other, and never starts it; `mast-services-standdown` (20) stops it at the start of every run, never deleting it; `mast-services-finalize` (9500) starts it on a supervised unit and asserts it absent otherwise (#262). A run that dies outright leaves it stopped until the next run or a reboot; the driver does not restart it, since a timed-out run may still be executing. **Not yet deployed**: the supervision pin moves first. Accepted on the labcomp2 dev VM, then on the pilot units — tentatively mast06 and mast07, with their own go-ahead (team decisions, 2026-11-12, tentative). Rollback: unflag the unit and run, which removes the service; by hand, `install-mast-service.ps1 -Uninstall` |
+| 5 | supervision, prov. | **Code merged**: the teardown (MAST_supervision#24), session (#25), service (#29), installer (#28), the supervisor's `--service` (#30). **Installed through provisioning on supervised units**: the registry's `supervised` flag (`StrictBool` or `None`, absent read as false; MAST_provisioning#261); the `mast-service` provider (order 2220) runs the installer on a supervised unit and removes the service on any other, and never starts it; `mast-services-standdown` (20) stops it at the start of every run, never deleting it; `mast-services-finalize` (9500) starts it on a supervised unit and asserts it absent otherwise (#262). A run that dies outright leaves it stopped until the next run or a reboot; the driver does not restart it, since a timed-out run may still be executing. **Not yet deployed**: the clone manifest pins supervision at `51c369c`, stage 5's head (MAST_provisioning#264); deployment waits on the dev-VM acceptance, then a unit's `supervised` flag in the registry and a provisioning run on it. Accepted on the labcomp2 dev VM, then on the pilot units — tentatively mast06 and mast07, with their own go-ahead (team decisions, 2026-11-12, tentative). Rollback: unflag the unit and run, which removes the service; by hand, `install-mast-service.ps1 -Uninstall` |
 | 6 | unit | the §9 deletions and the PHD2 fix; PHD2 flips from observed to supervised |
 | 7 | spec | mirror stage 6 |
 | 8 | common | delete `WatchedProcess`, `log_stream`, `kill_process_by_name`, and (after a cross-repo grep) `ensure_process_is_running` |
@@ -1115,7 +1117,7 @@ check compares the index folder, by name and size, with provisioning's manifest,
 `C:\MAST\state\mast-indexes.json`; `index_series` and `index_count` are no longer read.
 
 **Revised 2026-11-17**, stage 5's code merged, against MAST_supervision `main` @ `51c369c` and
-MAST_provisioning `main` @ `55b619e`. Team decisions of 2026-11-12, tentative, taken in the stage 5
+MAST_provisioning `main` @ `8c9c822`. Team decisions of 2026-11-12, tentative, taken in the stage 5
 implementation plan: the service spawns the supervisor with `CREATE_NO_WINDOW` rather than
 `CREATE_NEW_CONSOLE`, so no console close button can kill it (§4); the session bridge is pywin32
 only, and a test forbids `ctypes` (§2, §4); the supervisor's children break away from the
@@ -1126,7 +1128,7 @@ in that order, stopping PHD2 although it is observed, and sends a started-up uni
 acceptance moves from mast00 to the labcomp2 dev VM and then to pilot units, mast06 and mast07
 (§11, §15); and a run that dies outright leaves the service stopped (§15). The installer's stop
 parameters are set explicitly (§3). Provisioning's superseding decision is MAST_provisioning#262
-(§3, §12), and autologon on mast00 and mastw is dropped with them out of provisioning (§12). Still
+(§3, §12), MAST_provisioning#264 pins supervision at `51c369c` (§15), and autologon on mast00 and mastw is dropped with them out of provisioning (§12). Still
 not built, and marked so: the Actions menu and its modals, restart-to-apply, the per-row buttons,
 and §13's change callback and Apply item.
 
