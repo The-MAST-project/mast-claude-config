@@ -148,9 +148,9 @@ and the `sc.exe failure` triple, as the retired `mast-unit` installer had. `-Uni
 removes the service, for use by hand.
 
 **The stop is set explicitly**, not left to NSSM's defaults. NSSM stops `service.py` with a
-console Ctrl-C, which `service.py` turns into the stop of §4: `AppStopMethodConsole 420000` ms —
-the supervisor's 380 s stop grace (§4) plus 40 s for `service.py` to close the job and exit, the
-380 kept equal to `service.py`'s by a test; `AppStopMethodSkip 6`, so no `WM_CLOSE` or `WM_QUIT`
+console Ctrl-C, which `service.py` turns into the stop of §4: `AppStopMethodConsole 490000` ms —
+the supervisor's 450 s stop grace (§4) plus 40 s for `service.py` to close the job and exit, the
+450 kept equal to `service.py`'s by a test; `AppStopMethodSkip 6`, so no `WM_CLOSE` or `WM_QUIT`
 (`service.py` has no window and no message loop); `AppKillProcessTree 0`, so past the timeout NSSM
 terminates `service.py` alone — the supervisor dies with its job, and the programs, broken away
 from it, survive; and `AppNoConsole 0`, since the Ctrl-C needs a console to arrive on.
@@ -231,8 +231,9 @@ in order is the graceful path's job, not the kernel's. **Only under the service 
 without `BREAKAWAY_OK`, the flag makes `CreateProcess` fail.
 
 **The service's stop** (`service.py`, MAST_supervision#29): it signals the event, waits up to
-`SUPERVISOR_STOP_GRACE_SECONDS` — 380 s, the app's 200 s shutdown wait plus four programs × two
-10 s stop graces plus a 70 s app probe already running plus a 30 s margin (§7) — and then closes
+`SUPERVISOR_STOP_GRACE_SECONDS` — 450 s, the app's 200 s shutdown wait plus four programs × two
+10 s stop graces plus two 70 s app status reads (the one that decides the shutdown, and a probe
+already running) plus a 30 s margin (§7) — and then closes
 the job, which kills a supervisor still there. NSSM's stop timeout is set above it (§3).
 
 **The service never probes `Z:` or `D:`, never builds a `Filer`, and never calls
@@ -503,18 +504,17 @@ tentative). Seeing the stop event, the supervisor stops the app, then PHD2, PWI4
 (`supervisor.py`'s `TEARDOWN_ORDER`), each terminated, killed after the grace if it must be, and
 waited for before the next; the app goes first so that it lets go of PWI4 and PHD2 before they go.
 **PHD2 is stopped although it is observed** — the one exception to §6's rule that an observed
-program is never killed: left running, nothing would watch it. **A started-up unit is shut down
-first**: terminating the app skips its own `shutdown()` and would leave the covers open, so when
-the app's last reported `opstate` is `startedup` the supervisor sends `PUT /unit/shutdown` and
-waits up to `APP_SHUTDOWN_WAIT_SECONDS` (200 s, `probes.py`) for it to report `shutdown`, then
-stops it whatever the answer. Never when it is `initialized`: `shutdown` on a never-started unit
-first connects its components. Unit role only; a spec app reports no `opstate`.
-
-**Known gap, open — a stop during a startup.** The check reads the app's last reported `opstate`,
-which becomes `startedup` only when a startup completes. A service stop while the unit is still
-starting up (its `opstate` `initialized` or `shutdown`) therefore sends no `shutdown` and terminates
-the app mid-startup, leaving the covers and mount wherever the startup had got them. No fix has
-been decided.
+program is never killed: left running, nothing would watch it. **A unit whose covers may be open
+is shut down first**: terminating the app skips its own `shutdown()`. The supervisor reads the
+app's status fresh at stop time (`probes.shut_down_if_covers_may_be_open`, MAST_supervision#33)
+and sends `PUT /unit/shutdown` when it is `startedup` or its own `activities_verbal` lists
+`StartingUp` or `ShuttingDown`. A unit's `opstate` changes only when a startup or shutdown ends, so
+a startup under way still reports `initialized` or `shutdown`, and a shutdown reports `shutdown`
+while its covers close. It then waits up to `APP_SHUTDOWN_WAIT_SECONDS` (200 s, `probes.py`) for
+`shutdown` with no `ShuttingDown` left, and stops the app whatever the answer. A status that cannot
+be read falls back on the row's last probed `opstate`. Never when it is idle in `initialized` or
+`shutdown`: `shutdown` on a never-started unit first connects its components. Only an app with a
+process is checked. Unit role only; a spec app reports no `opstate`.
 
 Adoption (§6) is what makes restart-to-apply cheap: the supervisor re-adopts the PWI4 it left
 behind instead of killing and respawning it, and `CREATE_BREAKAWAY_FROM_JOB` keeps the job
@@ -667,11 +667,11 @@ restarts starts every program again (team decision, 2026-11-12, tentative). The 
 stop and start buttons and a traffic light per row, calling the same control, are design intent,
 not yet built, and do not gate the pilot.
 
-**Known gap, open — a hold on a started-up app.** `stop` on the app (a `production` app is
-supervised, so it is accepted) terminates it directly, with none of the teardown's
-shutdown-first (§7, *Two shutdown flavours*): a started-up unit is left with its covers and mount
-as they were, and nothing then watches them. Do not use the hold to take a started-up production
-app down; send it `shutdown` first. No code fix has been decided.
+**A hold of the app runs the teardown's check first** (MAST_supervision#33): when its covers may be
+open it is sent `shutdown` and waited for, on a thread of its own so the loop keeps ticking, and
+stopped once the check ends. It is listed under `held` from the request on, and reads `stopped`
+only then. A `start` meanwhile drops the pending stop but cannot recall a shutdown already sent:
+the app is left running, with the unit shut down.
 
 **Read-only, and the binding enforces it.** §13's boundary — *the supervisor is a console at the
 telescope, not a remote-control surface* — survives a read-only endpoint intact. But `/status` is
@@ -1136,7 +1136,7 @@ and §13's change callback and Apply item.
 **A supervised program can be held down** through `PUT …/programs/{name}/stop` and `/start` on
 the loopback action listener (§6, §7), built before the pilot because under supervision a killed
 program comes back; a hold is listed under `held` in the snapshot and forgotten when the
-supervisor restarts. A hold on a started-up app skips its `shutdown`, an open gap (§7). The
+supervisor restarts. A hold on an app whose covers may be open shuts it down first (§7, MAST_supervision#33). The
 window's buttons and traffic light stay design intent, not gating.
 
 **Revised 2026-11-17**, for MAST_common#228, one team decision of 2026-11-12, tentative, revising
@@ -1151,3 +1151,11 @@ app whose `opmode` differs from its launch is kept as a non-gating item for afte
 under `production` is **accepted, and recorded** rather than changed (§8). A unit-level route that
 autostarts starts a production unit up, covers and all, so a supervised unit in standby is inert
 only until its first real command; nothing but status reads should reach it while idle.
+
+**Revised 2026-11-17**, for MAST_supervision#33, which closed two gaps the first rounds of this day
+recorded as open (MAST_supervision#31, #32): **a hold and a teardown both shut down an app whose
+covers may be open**, decided on a status read fresh at stop time — `startedup`, or a startup or a
+shutdown under way by the unit's own activities, with the row's last `opstate` as the fallback
+when the status cannot be read (§7). A shutdown counts as done only with no `ShuttingDown` left.
+The service's stop grace grows by that status read, 380 → 450 s, and NSSM's console timeout to
+490 s (§3, §4). Against MAST_supervision `main` @ `3bc3be8`.
