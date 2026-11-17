@@ -47,7 +47,7 @@ the provenance chain:
 | | decided in | decided when | source |
 |---|---|---|---|
 | `tested` vs the rest | `app.main()` | before `Config()` exists | **env only** |
-| `development` vs `production` | `Unit.start_lifespan` | after `Config()` exists | env, then DB, then default |
+| `development` vs `production` | `Unit.start_lifespan` | after `Config()` exists | env, then DB, then launch opmode, then default |
 
 `tested` must be readable without the config DB, yet the DB is source #2. It is resolvable
 because `main()` asks only the environment.
@@ -98,10 +98,18 @@ literal. Copy that file's field declaration line for line.
 - `tested_mode_requested() -> bool` — `MAST_OPMODE` is `tested`. Touches no config, no DB.
   This is what `main()` asks first (§3).
 - `opmode_from_env() -> OpMode | None` — source #1 alone. Touches no config, no DB.
-- `resolve_opmode() -> OpMode` — env → config → `development`. On env miss, imports `Config`
-  *function-locally* and dispatches on `load_local_config().machine_role`: `unit` →
+- `resolve_opmode() -> OpMode` — env → config → launch opmode → `development`. On env miss,
+  imports `Config` *function-locally* and dispatches on `load_local_config().machine_role`: `unit` →
   `Config().get_unit().opmode`, `spec` → `Config().get_specs().opmode`, `control` → the
-  default. Any exception → WARNING + `development`.
+  default, without the launch check. Where the configuration cannot say — any exception reading
+  it, on any role including `spec` (the configuration unreadable from both the database and the
+  boot cache, or the local config.toml itself), or, on a unit, no configuration for this unit
+  (which includes a unit dropped from its site's `unit_ids`) — a WARNING, and the
+  `MAST_LAUNCH_OPMODE` the supervisor launched the app with if set, else `development`
+  (MAST_common#229, for #228). `resolve_opmode_with_source()` also names the source, here
+  `supervisor launch, <reason>` or `default, <reason>`. `MAST_OPMODE` and a readable
+  configuration — the database, or the boot cache when it is down — both outrank the launch
+  opmode.
 
 Role dispatch belongs in `common`, matching `notifications._build_initiator` and
 `init_log` (guarded by `common/tests/test_role_consumers.py`), so MAST_spec calls one
@@ -562,7 +570,8 @@ exists. The `tested` half is shared outright: same `tested_router`, same two rou
 - `common/tests/test_opmode.py` — env beats config; config beats default; default is
   `development` when no document carries the key (this doubles as the "adding the field breaks no
   existing unit" guard); a bad env value raises; case/whitespace tolerated; role dispatch for
-  `spec` and `control`; unreachable config → `development` + WARNING. **The critical one:** point
+  `spec` and `control`; unreadable config or no unit document → `MAST_LAUNCH_OPMODE` when set,
+  else `development`, + WARNING either way. **The critical one:** point
   `MAST_CONFIG` at a nonexistent path so any config read would raise, and assert
   `tested_mode_requested()` is still true with `MAST_OPMODE=tested` — that pins the circularity
   fix structurally. And `opmode_from_env()` raises on `tested`, naming it CI-only.
@@ -772,6 +781,10 @@ in §4a.
 
 **Revised 2026-10-13** with Arie, in session: the opstate set on completion, not on receipt,
 and `RUNNING` / `SHUTDOWN` renamed `STARTED_UP` / `SHUT_DOWN` (§4).
+
+**Revised 2026-11-17**, for MAST_common#228 (team decision, 2026-11-12, tentative): where the
+configuration cannot say, the mode the supervisor launched the app under (`MAST_LAUNCH_OPMODE`)
+stands in for the default (§1, §2), so a production unit restarted then does not run its startup.
 
 The `opmode`, `standby` and `standdown` identifiers were verified to have zero occurrences in
 either repo before being chosen.

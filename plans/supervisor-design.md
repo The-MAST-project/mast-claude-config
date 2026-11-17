@@ -8,7 +8,7 @@
 > `GET /status` on port 8004.
 >
 > **Status: stages 0–3 built, except the window's Actions menu; stage 5 code merged, not yet
-> deployed** — MAST_supervision #24–#26 and #28–#30, MAST_provisioning #261 and #262. The
+> deployed** — MAST_supervision #24–#30, MAST_provisioning #261 and #262, MAST_common #229. The
 > clone manifest still pins supervision at `395f7f8`, before stage 5, so no unit runs
 > `mast-service` until that pin moves. What is not built is marked so where it is described.
 > Design questions closed but one — what maintenance does on the machine, reopened by the
@@ -711,6 +711,17 @@ lost with it. `MAST_OPMODE` is passed through **only if the supervisor's own env
 it**; never inject the resolved DB value, or a DB value would masquerade as an env override and
 invert the opmode plan's precedence.
 
+**Instead the launcher sets `MAST_LAUNCH_OPMODE`** to the opmode it launched the app under, on every
+app launch, and not when it launches VSCode (MAST_supervision#27; team decision, 2026-11-12,
+tentative). The app reads it only where its configuration cannot say: `resolve_opmode_with_source`
+(MAST_common#229) uses it in its two fallbacks alone — no configuration for this unit, which
+includes a unit dropped from its site's `unit_ids`, and a configuration that cannot be read at
+all, neither from the database nor from the boot cache — and names the source `supervisor launch,
+<reason>`. `MAST_OPMODE` and a readable configuration — the database, or the boot cache when the
+database is down — both outrank it. Without it, an app the supervisor restarts long after boot, when its unit document has gone
+missing, would fall back to `development` and run its full startup with nobody there
+(MAST_common#228).
+
 **`opmode` — one field, two readers** (*decided*):
 
 - **`production`** → the supervisor launches the app, which comes up in standby awaiting the
@@ -907,7 +918,10 @@ restarted PHD2 leaves the unit silently claiming a healthy guider.
 
 **Through the supervisor's own Actions menu: write the DB, then restart** (§7) — *decided*.
 **None of this is built yet**: the supervisor reads `opmode` once at launch and compares it
-with nothing afterwards; the change callback and the Apply item come with the Actions menu.
+with nothing afterwards; the change callback and the Apply item come with the Actions menu. A
+narrower check is kept as a non-gating item for after the pilot: the supervisor flags an app
+whose reported `opmode` differs from the one it launched it under. Detection only, and not yet
+built.
 
 **Changed elsewhere — by the GUI, by the control machine, by hand in Mongo — the supervisor
 reports and does not act.** It registers a `Config` change callback on `units`, and when the
@@ -1115,3 +1129,11 @@ the loopback action listener (§6, §7), built before the pilot because under su
 program comes back; a hold is listed under `held` in the snapshot and forgotten when the
 supervisor restarts. A hold on a started-up app skips its `shutdown`, an open gap (§7). The
 window's buttons and traffic light stay design intent, not gating.
+
+**Revised 2026-11-17**, for MAST_common#228, one team decision of 2026-11-12, tentative, revising
+the same day's first answer. **The supervisor sets `MAST_LAUNCH_OPMODE` on every app launch** (§8;
+MAST_supervision#27, MAST_common#229), and `resolve_opmode` uses it only in its two fallbacks, so a
+readable configuration (database or boot cache) still decides and a production unit whose
+configuration cannot say stays production. Passing `MAST_OPMODE=production` instead was declined: it
+would make a database value masquerade as an env override, against §8. The supervisor flagging an
+app whose `opmode` differs from its launch is kept as a non-gating item for after the pilot (§13).
