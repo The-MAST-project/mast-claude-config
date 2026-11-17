@@ -727,7 +727,14 @@ missing, would fall back to `development` and run its full startup with nobody t
 - **`production`** → the supervisor launches the app, which comes up in standby awaiting the
   control machine. Restart on process exit or on the status endpoint not answering — **never**
   because `operational` is false; that is health, and the opmode plan puts health in
-  `operational`/`why_not_operational`.
+  `operational`/`why_not_operational`. **Standby lasts until the first real command** — accepted
+  (team decision, 2026-11-12, tentative): a production unit is inert until `startup`, or any of
+  the ten autostartup routes (`start_autofocus`, `start_acquisition_and_guiding`, `start_guiding`,
+  `expose`, `test_stage_repeatability`, `spiral_new_path`, `spiral_next_step`,
+  `spiral_previous_step`, `acquire_and_find_max_flux`, `focus_on_star`; the first three registered
+  only when the unit has that component; the mechanism is MAST_unit#395), which starts it up —
+  covers opened, mount homed — before doing the work. Nothing but status reads should reach an
+  idle production unit.
 *(The opmodes were `automatic` / `controlled` until 2026-10-06, then `operated` / `controlled`
 until 2026-10-12 — see opmode-design §2. `development`: an engineer runs the app from VSCode,
 and it starts the machine immediately. `production`: the control machine's supervisor runs the
@@ -1137,3 +1144,8 @@ readable configuration (database or boot cache) still decides and a production u
 configuration cannot say stays production. Passing `MAST_OPMODE=production` instead was declined: it
 would make a database value masquerade as an env override, against §8. The supervisor flagging an
 app whose `opmode` differs from its launch is kept as a non-gating item for after the pilot (§13).
+
+**Revised 2026-11-17**, for MAST_unit#395, one team decision of 2026-11-12, tentative: autostartup
+under `production` is **accepted, and recorded** rather than changed (§8). A unit-level route that
+autostarts starts a production unit up, covers and all, so a supervised unit in standby is inert
+only until its first real command; nothing but status reads should reach it while idle.

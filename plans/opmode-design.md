@@ -181,6 +181,15 @@ So the `production` branch of `start_lifespan` is nearly a no-op: call the exist
 `connect()`'s mount setter runs `mount_enable(0)`/`mount_enable(1)`
 ([mount.py:250-255](../../unit/src/mount.py#L250)), servos hold torque, nothing homes.
 
+**Standby lasts until the first real command** — accepted (team decision, 2026-11-12, tentative). A
+production unit is inert until `startup`, or any of the ten autostartup routes (`start_autofocus`,
+`start_acquisition_and_guiding`, `start_guiding`, `expose`, `test_stage_repeatability`,
+`spiral_new_path`, `spiral_next_step`, `spiral_previous_step`, `acquire_and_find_max_flux`,
+`focus_on_star`; the first three registered only when the unit has that component; the mechanism is
+MAST_unit#395), which starts it up — covers opened, mount homed — before doing the work; in
+`production` it then refuses the work unless the unit is operational or only cooling
+(MAST_unit#411). Nothing but status reads should reach an idle production unit.
+
 The branch goes in `Unit.start_lifespan` ([unit.py:651-653](../../unit/src/unit.py#L651)),
 **not** `app.py` — `app.py` is deliberately `Unit`-free (`from unit import Unit` lives inside
 `main()` at :322) and its lifespan branches only on `unit is None`.
@@ -785,6 +794,8 @@ and `RUNNING` / `SHUTDOWN` renamed `STARTED_UP` / `SHUT_DOWN` (§4).
 **Revised 2026-11-17**, for MAST_common#228 (team decision, 2026-11-12, tentative): where the
 configuration cannot say, the mode the supervisor launched the app under (`MAST_LAUNCH_OPMODE`)
 stands in for the default (§1, §2), so a production unit restarted then does not run its startup.
+And autostartup under `production` (MAST_unit#395) is accepted and recorded in §3: standby lasts
+until the first real command.
 
 The `opmode`, `standby` and `standdown` identifiers were verified to have zero occurrences in
 either repo before being chosen.
