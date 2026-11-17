@@ -7,11 +7,16 @@
 > snapshot: a small GUI with a rolling log, a five-minute heartbeat in the log file, and
 > `GET /status` on port 8004.
 >
-> **Status: plan only — not implemented; design questions closed but one** — what maintenance
-> does on the machine, reopened by the predecessor record (see the 2026-09-24 provenance round).
+> **Status: stages 0–3 built, except the window's Actions menu; stage 5 code merged, not yet
+> deployed** — MAST_supervision #24, #25 and #28–#30, MAST_provisioning #261 and #262. The
+> clone manifest still pins supervision at `395f7f8`, before stage 5, so no unit runs
+> `mast-service` until that pin moves. What is not built is marked so where it is described.
+> Design questions closed but one — what maintenance does on the machine, reopened by the
+> predecessor record (see the 2026-09-24 provenance round).
 > Code home: the **MAST_supervision** repo (§2), with its shared building blocks in MAST_common.
 > Depends on `claude/plans/opmode-design.md` stage 1. Code baseline: MAST_common `master`
-> @ `5dfd263`, MAST_unit `main`, 2026-09-16; revised 2026-09-22 and 2026-09-24.
+> @ `5dfd263`, MAST_unit `main`, 2026-09-16; revised 2026-09-22 and 2026-09-24; revised
+> 2026-11-17 against MAST_supervision `main` @ `51c369c` and MAST_provisioning `main` @ `55b619e`.
 
 ## Context
 
@@ -86,13 +91,20 @@ supervision/                  the repo root = the `supervision` package
                   owns the child watchdog                                        [Windows]
   session.py      the WTS / CreateProcessAsUser bridge, behind a replaceable API [Windows]
   supervisor.py   the phase machine
+  wiring.py       the real outside world the loop is given: config DB, probes, the OS
+  instance.py     the port claim: one supervisor per machine (§7)
+  programs.py     the programs resolved from the configuration: what to run, how to probe
   resources.py    network / ramdisk+indexes / share probes
+  ramdisk.py      reviving a lost D: through provisioning's SYSTEM task (§14)
   probes.py       pwi4 / phd2 / ps3cli / app health callables — imports nothing from unit/
   managed.py      ManagedProcess: adopt-or-spawn, health loop, backoff, crash-loop cap
+  backoff.py      doubling waits up to a cap, importable by service.py
+  clock.py        the injected monotonic and wall clocks
   launcher.py     build_launch(): the pure role+opmode -> LaunchSpec function
   locate.py       locate_vscode_exe(), locate_pwi4_exe()  — modelled on phd2_locate.py
   logsink.py      DequeHandler, rebind_daily_handler()
   state.py        the published snapshot (Pydantic) — one source for GUI, heartbeat and API
+  heartbeat.py    the heartbeat block rendered from a snapshot (§7)
   api.py          the FastAPI app: GET /status                          [fastapi, uvicorn]
   gui_model.py    the pure drain function — NO tkinter
   gui.py          the tkinter window                   [tkinter; ttkbootstrap if installed]
@@ -102,8 +114,10 @@ supervision/                  the repo root = the `supervision` package
 ```
 
 `win32*` lives only in `session.py`/`service.py`, `tkinter` and `ttkbootstrap` only in `gui.py`,
-so the package imports on Linux CI. The installer sits in `install/`, not `service/`, which would
-collide with `service.py`.
+so the package imports on Linux CI. Win32 goes through **pywin32 only**, never `ctypes`, which
+the tests' spawn guard cannot see; `tests/test_import_boundaries.py` forbids a `ctypes` import
+anywhere in the package (team decision, 2026-11-12, tentative). The installer sits in
+`install/`, not `service/`, which would collide with `service.py`.
 
 The name collides with an unrelated PyPI package, Roboflow's `supervision`. `mast.pth` entries
 come after site-packages on `sys.path`, so an install of it would silently shadow ours;
@@ -115,18 +129,31 @@ snapshot. It is a Pydantic model so FastAPI serialises it with no second schema,
 neither `tkinter` nor `fastapi`, so the snapshot tests run on Linux CI. `gui_model.py` keeps only
 the drain.
 
-Both processes are `python.exe`, which `find_process`'s image-name match cannot tell apart, so
-each carries an explicit `--role` argument **and** a `Global\` named mutex — copy the shape of
-`Filer._take_sweep_guard` ([filer.py:420-437](../../common/filer.py#L420)), which already
-documents the session-0/session-1 scoping and `SeCreateGlobalPrivilege`.
+Both processes are `python.exe`, which `find_process`'s image-name match cannot tell apart.
+Neither takes a role argument: the role is config.toml's `machine_role`, as everywhere else.
+**The supervisor's one-per-machine lock is its status port** (§7, `instance.py`), not a mutex.
+**Only `service.py` takes one**, `Global\mast-service`: killing `nssm.exe` alone orphans
+`service.py`, and the service control manager's restart would start a second, so a second copy
+exits with code 2 instead of starting a second supervisor (team decision, 2026-11-12, tentative).
 
 ## 3. The service
 
-`supervision/install/install-mast-service.ps1`. Runs `python.exe -m supervision.service`,
-`AppDirectory=<top>`, with AppStdout/AppStderr rotation, `AppRestartDelay 5000` and the
-`sc.exe failure` triple, as the retired `mast-unit` installer had.
+`supervision/install/install-mast-service.ps1` (MAST_supervision#28). **Idempotent**: it
+registers the service when absent, sets every parameter on every run, and **never starts it**.
+NSSM runs `<top>\.venv\Scripts\python.exe -m supervision.service` with `AppDirectory=<top>`,
+AppStdout/AppStderr in `C:\MAST\logs\mast-service\` rotated at 10 MiB, `AppRestartDelay 5000`
+and the `sc.exe failure` triple, as the retired `mast-unit` installer had. `-Uninstall` stops and
+removes the service, for use by hand.
 
-**This reverses a recorded MAST_provisioning decision, and needs a superseding one.**
+**The stop is set explicitly**, not left to NSSM's defaults. NSSM stops `service.py` with a
+console Ctrl-C, which `service.py` turns into the stop of §4: `AppStopMethodConsole 420000` ms —
+the supervisor's 380 s stop grace (§4) plus 40 s for `service.py` to close the job and exit, the
+380 kept equal to `service.py`'s by a test; `AppStopMethodSkip 6`, so no `WM_CLOSE` or `WM_QUIT`
+(`service.py` has no window and no message loop); `AppKillProcessTree 0`, so past the timeout NSSM
+terminates `service.py` alone — the supervisor dies with its job, and the programs, broken away
+from it, survive; and `AppNoConsole 0`, since the Ctrl-C needs a console to arrive on.
+
+**This reversed a recorded MAST_provisioning decision, and a superseding one now records it.**
 MAST_provisioning#159 removed every MAST service: provisioning registers none, stands any down
 before a run, and asserts absence at the end; `server/prov/tests/test_no_service_registration.py`
 fails the build if a registration comes back
@@ -136,12 +163,13 @@ by a hand-run unit that can neither draw with it nor see `Z:` — and that `mast
 hardware on process start with no interlock. `mast-service` answers both by construction: it
 spawns nothing but the supervisor, and the supervisor and everything it starts run in the
 interactive session (§4); and under `development` it launches VSCode, never the app (§8). So the
-supersession is a change of reason, not a reversal of intent — but it is provisioning's decision
-to record, beside the test and the finalize assertion it relaxes for `mast-service` alone.
-`mast-service` is not among `Get-MastServiceNames`' four names, so the stand-down would not remove
-it; the test and the absence assertion would still fail the run.
+supersession is a change of reason, not a reversal of intent — and provisioning recorded it,
+beside the test and the finalize assertion it relaxes for `mast-service` alone: MAST_provisioning#262,
+`docs/decisions/2026-11-12-provisioning-installs-and-runs-mast-service-on-supervised-units.md`.
+`mast-service` is kept out of `Get-MastServiceNames`' four legacy names, which the driver deletes,
+and has its own accessor; how a run installs, stops and starts it is §15's stage 5.
 
-**As LocalSystem — `ObjectName` omitted.** `WTSQueryUserToken` needs `SE_TCB_NAME` and
+**As LocalSystem, with automatic start.** `WTSQueryUserToken` needs `SE_TCB_NAME` and
 `CreateProcessAsUser` needs `SE_ASSIGNPRIMARYTOKEN_NAME`; LocalSystem holds both. Granting
 `SeTcbPrivilege` to `.\mast` is security-equivalent with more moving parts. This also deletes
 the installer's interactive password prompt, which is why it cannot run from provisioning
@@ -162,9 +190,15 @@ dup   = DuplicateTokenEx(token, ..., TokenPrimary)
 env   = CreateEnvironmentBlock(dup, bInherit=False)
 si.lpDesktop = r"winsta0\default"
 CreateProcessAsUser(dup, python, cmdline,
-                    CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED, ...)
+                    CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED, ...)
 AssignProcessToJobObject(job, hProcess); ResumeThread(hThread)
 ```
+
+Built as `session.py` (MAST_supervision#25), through pywin32 (§2). The command line is
+`python -m supervision --service`. **`CREATE_NO_WINDOW`, not `CREATE_NEW_CONSOLE`** (team
+decision, 2026-11-12, tentative): a visible console has a close button that kills the supervisor,
+which closing its window must never do (§7). Whether the window still appears under it is checked
+by eye in acceptance (§11).
 
 Three silent failures, each worth a test:
 
@@ -175,23 +209,35 @@ Three silent failures, each worth a test:
 - Hold `hProcess` — it is both the teardown handle and the death detector.
 
 No interactive session is **not** an error: log once per state change, back off
-(`_Backoff(1.0, cap 60.0)`, copied from [config/_watcher.py:57-62](../../common/config/_watcher.py#L57)),
+(`Backoff(1.0, cap 60.0)`, `backoff.py`, copied from [config/_watcher.py:57-62](../../common/config/_watcher.py#L57)),
 retry. The watchdog is the same wait: `WaitForSingleObject(hProcess, 1000)` in a loop, so a
-logoff/logon cycle needs no special case.
+logoff/logon cycle needs no special case. A supervisor that exits is restarted after a wait
+doubling from 1 s to 60 s, which starts again once a supervisor has run for 60 s.
 
 **Teardown is two mechanisms.** A named event `Global\mast-supervisor-stop` with an explicit
-DACL (the service is LocalSystem, the supervisor is `mast`) for the graceful path; and a job
-object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK` as the
-backstop, so a `TerminateProcess` on the service cannot orphan the supervisor. The supervisor
+DACL (the service is LocalSystem, the supervisor is `mast`) for the graceful path —
+`D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00100000;;;IU)`: SYSTEM and Administrators full access,
+interactive users `SYNCHRONIZE` only, so the supervisor can wait on it but not signal it; and a
+job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK` as the
+backstop, so a `TerminateProcess` on the service cannot orphan the supervisor. A `--service`
+supervisor that cannot open the event does not start. The supervisor
 spawns PWI4/PHD2/ps3cli/the app with `CREATE_BREAKAWAY_FROM_JOB`, so a hard service kill — and,
-deliberately, a restart-to-apply (§7) — removes the supervisor and **leaves the telescope
-applications running** — tearing those down
-in order is the graceful path's job, not the kernel's.
+deliberately, a restart-to-apply (§7, not yet built) — removes the supervisor and **leaves the
+telescope applications running** — tearing those down
+in order is the graceful path's job, not the kernel's. **Only under the service launch**
+(`managed.py`, team decision, 2026-11-12, tentative): under `--no-service`, in a terminal's job
+without `BREAKAWAY_OK`, the flag makes `CreateProcess` fail.
+
+**The service's stop** (`service.py`, MAST_supervision#29): it signals the event, waits up to
+`SUPERVISOR_STOP_GRACE_SECONDS` — 380 s, the app's 200 s shutdown wait plus four programs × two
+10 s stop graces plus a 70 s app probe already running plus a 30 s margin (§7) — and then closes
+the job, which kills a supervisor still there. NSSM's stop timeout is set above it (§3).
 
 **The service never probes `Z:` or `D:`, never builds a `Filer`, and never calls
 `configure_logging()`.** Mapped drives are per-logon-session
 (`claude/memory/reference_fleet_topology.md:21`), so session 0's answers are meaningless. It
-logs to `C:\MAST\Logs\mast-service\` and stays off the share entirely. Every resource probe
+logs to `C:\MAST\logs\mast-service\` with the standard library (`mast-service.log`, rotated at
+10 MiB) and stays off the share entirely. Every resource probe
 lives in the supervisor, in the session the app will actually run in.
 
 ## 5. Phases and resources
@@ -258,7 +304,10 @@ supervisor cannot stop (an elevated one) is `blocked` too. Spawned programs run 
 
 Spawn with an argv **list** and `shell=False` — `process.py`'s `cmd.split()` is broken for
 `C:\Program Files (x86)\…`, which is the whole reason the current code passes `shell=True` and
-quotes by hand. No `CREATE_NO_WINDOW`: PWI4 and PHD2 are GUI applications.
+quotes by hand. Every child is spawned with `CREATE_NO_WINDOW`, as MAST_common's `process.py`
+starts them: a console child such as ps3cli gets a console of its own with no window, rather than
+sharing the supervisor's and with it the supervisor's Ctrl-C, and GUI programs such as PWI4 ignore
+the flag. Under the service, `CREATE_BREAKAWAY_FROM_JOB` is added (§4).
 
 | process | health probe | interval |
 |---|---|---|
@@ -281,10 +330,16 @@ start is not a restart loop. An adopted program gets none. Probes never overlap:
 probe waits for its last, since the app probe may run 70 s on a 15 s interval.
 
 Failure handling: `unhealthy_threshold` (3) consecutive failures → terminate, grace, kill,
-respawn; `_Backoff(5.0, cap 120.0)` between restarts; more than 5 restarts in 600 s →
+respawn; `Backoff(5.0, cap 120.0)` (`backoff.py`, from the configuration's `restart_backoff_seconds`
+and `restart_backoff_cap_seconds`) between restarts; more than 5 restarts in 600 s →
 `CRASH_LOOPED`, stop, red on the GUI, one ERROR naming the last exit code, and a "retry now"
-button. A PWI4 that exits immediately because the mount is unplugged must not be restarted
-eight thousand times a night.
+button (not yet built: the window is read-only, §7). A PWI4 that exits immediately because the
+mount is unplugged must not be restarted eight thousand times a night.
+
+**A stop is final** (`ManagedProcess.stop()`, MAST_supervision#24): the restart path's terminate,
+grace, kill, and then no respawn. The row ends **`stopped`** (WARNING), or `blocked` when the
+program refuses terminate or survives kill. `release()` undoes it: the program is looked for, and
+started, again. The service's teardown (§7) is its caller.
 
 **`not_supervised` is a distinct state, not a flavour of unhealthy.** VSCode under `development`
 (§8) is launched once and never restarted, so "not running" is its normal resting condition.
@@ -306,7 +361,8 @@ itself through `WatchedProcess.start()`, which first calls `kill_process_by_name
 kills the supervisor's PHD2 — and the supervisor restarts it into a fight — or its name match
 misses (the path is backslashed, the split is on `/`; unverified) and a second instance starts.
 So `ManagedProcessConfig` carries an observe mode: probe and report, never spawn or restart.
-PHD2's default flips to supervised in the same change as §9.2. PWI4 and ps3cli need no such
+PHD2's default flips to supervised in the same change as §9.2. The one exception to "observed is
+never killed" is the service's teardown, which stops PHD2 too (§7). PWI4 and ps3cli need no such
 mode: `app.py` raises them through `ensure_process_is_running`, which starts one only if none
 is running, so it finds the supervisor's and leaves it alone.
 
@@ -353,7 +409,8 @@ material online is still 1.x: `ScrolledText`, the widget this design needs, move
 
 **Menu bar: Actions | About | Help.** `About` gives version, `<top>`, hostname, role, config
 generation and a copy-diagnostics button; `Help` points at `docs/supervision.md` and the log
-folder.
+folder. **Built: About and Help only** — the window is read-only (`gui.py`); the Actions menu
+is not yet built (see its subsection).
 
 **Header labels**, the two an operator acts on given their own line and large type:
 
@@ -365,12 +422,15 @@ Opmode:          production
 plus hostname · role · phase · uptime · `opstate` · config generation, with `Config().degraded_reason`
 verbatim when present.
 
-Then a resources table; a processes table with per-row restart buttons; and a rolling log pane
+Then a resources table; a processes table with per-row restart buttons (not yet built); and a
+rolling log pane
 filling the rest — `ScrolledText`, monospace, per-level colour tags, a level filter, and an
 autoscroll toggle that pins to the tail so an operator can scroll back without fighting it.
 
 **No Quit button.** The supervisor's lifetime belongs to the service; intercept
-`WM_DELETE_WINDOW` and iconify, logging how to actually stop it.
+`WM_DELETE_WINDOW` and iconify, logging how to actually stop it: Ctrl-C in its console under
+`--no-service`, and under the service `sc stop mast-service`, which stops the programs with it
+(`gui_model.py`'s close hint; team decision, 2026-11-12, tentative — there is no console there).
 
 Logging crosses threads on a bounded deque:
 
@@ -396,6 +456,9 @@ the deque or on snapshots published by whole-reference assignment; tables are re
 snapshot, never from live state.
 
 ### The Actions menu — the two operator verbs
+
+**Not yet built**, nor its modals, nor restart-to-apply; parked until after the pilot (team
+decision, 2026-11-12, tentative). This subsection is design intent.
 
 ```
 Actions ─ Maintenance mode ─ activate / deactivate
@@ -428,8 +491,27 @@ the same path every crash recovery uses, and therefore the best-exercised one in
 
 | | stops PWI4 / PHD2 / ps3cli | stops the app |
 |---|---|---|
-| service stopping (`Global\mast-supervisor-stop`) | yes, in order | yes |
-| restart-to-apply (menu action) | **no — left running, re-adopted on the way back up** | only if the new mode requires it |
+| service stopping (`Global\mast-supervisor-stop`) — built | yes, in order | yes, first |
+| Ctrl-C under `--no-service`, or a loop that dies — built | no — left running, adopted on the next start | no |
+| restart-to-apply (menu action) — not yet built | **no — left running, re-adopted on the way back up** | only if the new mode requires it |
+
+**The service's stop, as built** (MAST_supervision#24, #30; team decisions, 2026-11-12,
+tentative). Seeing the stop event, the supervisor stops the app, then PHD2, PWI4 and ps3cli
+(`supervisor.py`'s `TEARDOWN_ORDER`), each terminated, killed after the grace if it must be, and
+waited for before the next; the app goes first so that it lets go of PWI4 and PHD2 before they go.
+**PHD2 is stopped although it is observed** — the one exception to §6's rule that an observed
+program is never killed: left running, nothing would watch it. **A started-up unit is shut down
+first**: terminating the app skips its own `shutdown()` and would leave the covers open, so when
+the app's last reported `opstate` is `startedup` the supervisor sends `PUT /unit/shutdown` and
+waits up to `APP_SHUTDOWN_WAIT_SECONDS` (200 s, `probes.py`) for it to report `shutdown`, then
+stops it whatever the answer. Never when it is `initialized`: `shutdown` on a never-started unit
+first connects its components. Unit role only; a spec app reports no `opstate`.
+
+**Known gap, open — a stop during a startup.** The check reads the app's last reported `opstate`,
+which becomes `startedup` only when a startup completes. A service stop while the unit is still
+starting up (its `opstate` `initialized` or `shutdown`) therefore sends no `shutdown` and terminates
+the app mid-startup, leaving the covers and mount wherever the startup had got them. No fix has
+been decided.
 
 Adoption (§6) is what makes restart-to-apply cheap: the supervisor re-adopts the PWI4 it left
 behind instead of killing and respawning it, and `CREATE_BREAKAWAY_FROM_JOB` keeps the job
@@ -581,10 +663,10 @@ No `ApiDomain.Supervisor` and no `BaseApi` client for `/status` yet — that is 
 caller. Add them when MAST_gui or the controller actually polls. (`common/api.py`'s
 `SupervisorApi` is the loopback client for the action routes only, used by `Filer`.)
 
-Two consequences to state rather than discover. Restart-to-apply (§7) drops the port for about
-ten seconds, and from outside `ECONNREFUSED` is indistinguishable from a dead machine; nothing to
-be done, but a poller will alarm and the design should have said so first. And **the service
-(session 0) serves nothing** — same rule as §4, for the same reason.
+Two consequences to state rather than discover. Restart-to-apply (§7), once built, drops the port
+for about ten seconds, and from outside `ECONNREFUSED` is indistinguishable from a dead machine;
+nothing to be done, but a poller will alarm and the design should have said so first. And **the
+service (session 0) serves nothing** — same rule as §4, for the same reason.
 
 ## 8. Launching the app
 
@@ -656,11 +738,11 @@ rationale ("app.py calls `ensure_process_is_running` at module level") is what c
 and `unit/DECISIONS.md:1246` ("ps3cli health is a startup-time probe, not a supervised
 process"), which this supersedes and whose new entry must say so.
 
-**The developer path** — *decided*: `python -m supervision --gui --no-service --no-app`
-is the supported dev entry point, giving production topology minus the service; the developer
-then runs `python app.py`. No fallback spawning in the app: two owners of a process makes "who
-started this" unanswerable from a log. Pair it with self-explaining errors — *"PWI4 is not
-answering on 127.0.0.1:8220 — is mast-service running? see docs/supervision.md"* — which is the
+**The developer path** — *decided*: `python -m supervision --no-service --no-app` (the window opens
+unless `--no-gui`) is the supported dev entry point, giving production topology minus the service;
+the developer then runs `python app.py`. No fallback spawning in the app: two owners of a process
+makes "who started this" unanswerable from a log. Pair it with self-explaining errors — *"PWI4 is
+not answering on 127.0.0.1:8220 — is mast-service running? see docs/supervision.md"* — which is the
 cheapest part of this migration and the part that pays back daily.
 
 ## 10. Configuration
@@ -732,11 +814,11 @@ logging record and not ten; it is pure ASCII (`text.isascii()` — the MAST_comm
 the level is INFO when all green, WARNING with a degraded resource, ERROR with a crash-looped
 process; and a phase change emits one immediately rather than waiting for the interval.
 
-`test_supervisor_actions.py` covers the two operator verbs against a fake config source: activate
-→ exactly one `$addToSet` with the normalized name and no read-modify-write; deactivate → one
-`$pull`; both refuse while `degraded` and neither writes; an opmode change writes the one-key
-delta; and each returns the restart request rather than calling `sys.exit` itself, so the
-decision is testable apart from the exit.
+`test_supervisor_actions.py`, with the Actions menu (not yet built), covers the two operator verbs
+against a fake config source: activate → exactly one `$addToSet` with the normalized name and no
+read-modify-write; deactivate → one `$pull`; both refuse while `degraded` and neither writes; an
+opmode change writes the one-key delta; and each returns the restart request rather than calling
+`sys.exit` itself, so the decision is testable apart from the exit.
 
 `test_supervisor_status_api.py` runs the app on uvicorn on an ephemeral loopback port, which
 runs on Linux CI (`TestClient` would need httpx, which the repo does not declare): `/status` answers from a `STARTING` snapshot **before any
@@ -752,21 +834,24 @@ killed and the port taken; a `STOPPING` one is waited for, then killed once the 
 a holder that is not a supervisor, or cannot be killed, aborts.
 
 Add `win32process.CreateProcess`/`CreateProcessAsUser` to the denied set in the common and unit
-conftests — the guard has a second door now — and give MAST_supervision's own conftest the same
-guard from its first test.
+conftests — the guard has a second door now; neither has it yet. MAST_supervision's own conftest
+has had the guard, `win32process` included, from its first test.
 
-**Manual acceptance on mast00** (nothing above covers these): `sc start mast-service` → a window
+**Manual acceptance, planned, not yet run** (nothing above covers these): first on the labcomp2
+dev VM, provisioned with `vm/run-prov-test.py --supervised` (MAST_provisioning#261), then on the
+pilot units (§15) — not mast00, which is excluded from provisioning (team decision, 2026-11-12,
+tentative). `sc start mast-service` → a window
 appears in the interactive session within 30 s; `sc stop` → it goes, with no orphan;
-`taskkill /f` the service → the supervisor dies with it (the job object); log off and back on →
+`taskkill /f` the service → the supervisor dies with it (the job object) and the supervised
+programs survive; log off and back on →
 it reappears in the new session; kill PWI4 by hand → back within ~15 s and the GUI says so;
 reboot → everything comes up with no keystroke; and **`curl http://<unit>:8004/mast/api/v1/supervisor/status`
-from the control machine answers while the unit is still in `WAITING_FOR_RESOURCES`** — which is
+from another machine answers while the unit is still in `WAITING_FOR_RESOURCES`** — which is
 both the endpoint's purpose and the only end-to-end check that nothing blocks 8004 inbound.
 
-Whichever toolkit §7 settles on, its rendering under `CreateProcessAsUser` with
-`CREATE_NEW_CONSOLE` in an autologon session belongs here too, not in a unit test: whether a
-themed `ttk` window or a TUI comes up correctly depends on that session's window station and, for
-a console, on whether it is `conhost` or Windows Terminal.
+The window's rendering under `CreateProcessAsUser` with `CREATE_NO_WINDOW` in an autologon
+session belongs here too, not in a unit test: no console window may appear, and the themed `ttk`
+window must, which depends on that session's window station.
 
 ## 12. Prerequisites
 
@@ -777,20 +862,20 @@ machine is worse off than today.
 - **Provisioned units already have it** — verified 2026-09-24 against MAST_provisioning `main`:
   `client/bootstrap.ps1` configures Winlogon `AutoAdminLogon` for `mast` as a first-touch
   element (skippable with `-SkipAutoLogon`).
-- **mast00 and mastw do not.** mast00 verified: `AutoAdminLogon` unset, no `DefaultUserName`, no
-  `DefaultPassword`, the live `mast` console session logged on by hand. Both predate
-  MAST_provisioning — the same reason mast00's PDU sits at `10.23.1.75` on the units' own VLAN
-  while every provisioned unit's is on `10.23.2.x`. So autologon is a two-machine catch-up, not
-  a fleet-wide change.
+- **mast00 and mastw do not, and do not get it.** mast00 verified: `AutoAdminLogon` unset, no
+  `DefaultUserName`, no `DefaultPassword`, the live `mast` console session logged on by hand.
+  Both predate MAST_provisioning and are excluded from provisioning runs, so neither is a
+  supervisor target; their autologon is dropped from stage 4.
 
-Not yet checked: whether `bootstrap.ps1` writes the password as plaintext
-`HKLM\…\Winlogon\DefaultPassword` or as an LSA secret. Sysinternals `Autologon.exe` does the
-latter and is the recommendation if it is the former. Screen lock and screensaver must also be
-disabled by policy, or the GUI exists where nobody can see it.
+`bootstrap.ps1` writes the password as plaintext `HKLM\…\Winlogon\DefaultPassword`, by its own
+comment acceptable because `mast` uses the fleet's non-secret default and the units sit on an
+isolated VLAN; Sysinternals `Autologon.exe` (an LSA secret) is the hardening path if that
+changes. Screen lock and screensaver must still be disabled by policy, or the GUI exists where
+nobody can see it; provisioning does not set that yet.
 
-**A superseding MAST_provisioning decision permitting `mast-service`** (§3), with the
-no-registration test and the finalize absence assertion relaxed for that one name. Blocks
-stage 5, not stages 0–3.
+**A superseding MAST_provisioning decision permitting `mast-service`** (§3) — met by
+MAST_provisioning#262, with the no-registration test and the finalize absence assertion relaxed
+for that one name.
 
 **The PHD2 `_connected` fix** (§9.3) — blocking, and unambiguously so. Promoted from follow-up
 to prerequisite by the decision that a PHD2 restart must not restart the app: until it lands, a
@@ -799,6 +884,8 @@ restarted PHD2 leaves the unit silently claiming a healthy guider.
 ## 13. Changing `opmode` while running
 
 **Through the supervisor's own Actions menu: write the DB, then restart** (§7) — *decided*.
+**None of this is built yet**: the supervisor reads `opmode` once at launch and compares it
+with nothing afterwards; the change callback and the Apply item come with the Actions menu.
 
 **Changed elsewhere — by the GUI, by the control machine, by hand in Mongo — the supervisor
 reports and does not act.** It registers a `Config` change callback on `units`, and when the
@@ -834,11 +921,11 @@ telescope, not a remote-control surface.
 | 0 | common | `common/opmode.py` (the merged opmode plan, stage 1) — prerequisite |
 | 1 | common | `config/supervisor.py`; `const.py` ports + `MINIMUM_PWI4_VERSION` + `SUPERVISOR_PORT` (8004, after the cross-repo grep) + `BASE_SUPERVISOR_PATH`; `find_processes`/`process_session_id`; `init_log` gains `program=LogProgram`; **a `sites` write path** (`$addToSet`/`$pull` on `units_in_maintenance`) beside `write_unit_delta` |
 | 1a | supervision | the seed: `pyproject.toml`, `uv.lock`, `ruff.toml`, CI (Linux + Windows, paired MAST_common branch), README, `docs/decisions/` records (MAST_provisioning's format), CLAUDE.md, the package-location test |
-| 1b | prov. | `mast-repos.tsv` row (`supervision`, `MAST_supervision`, `unit,spec`, `main`); `mast-clone` accepts `pyproject.toml` — `-r <dir>/pyproject.toml --group <dir>/pyproject.toml:dev` — where a repo has no `requirements.txt` |
+| 1b | prov. | `mast-repos.tsv` row (`supervision`, `MAST_supervision`, `unit`, `main`); `mast-clone` accepts `pyproject.toml` — `-r <dir>/pyproject.toml --group <dir>/pyproject.toml:dev` — where a repo has no `requirements.txt` |
 | 2 | supervision | `state.py`, resources, probes, managed, launcher, locate, logsink, gui_model + every test. `--dry-run` prints the resolved plan and exits |
-| 3 | supervision | `api.py` and the status endpoint; gui (incl. the Actions menu and its modals), supervisor, `__main__`. **Run a night on mast00** as `--gui --no-service --no-app`, supervising PWI4/ps3cli and observing PHD2 while the operator runs the app from VSCode — adoption is what makes two owners safe, and this is the highest-value de-risking step |
-| 4 | prov. | autologon on mast00 and mastw; nssm at a managed path; write `<top>/mast-<role>.code-workspace`; the superseding service decision (§3, §12) |
-| 5 | supervision | session, service, installer. Install on mast00 — rollback is `sc stop mast-service` and uninstall, back to today's hand-run app |
+| 3 | supervision | `api.py` and the status endpoint; gui (incl. the Actions menu and its modals — not yet built; the window is read-only), supervisor, `__main__`. **Run a night on mast00** as `--no-service --no-app`, supervising PWI4/ps3cli and observing PHD2 while the operator runs the app from VSCode — adoption is what makes two owners safe, and this is the highest-value de-risking step |
+| 4 | prov. | autologon on mast00 and mastw — dropped, both being excluded from provisioning (§12); nssm at a managed path; write `<top>/mast-<role>.code-workspace`; the superseding service decision (§3, §12) — done, MAST_provisioning#262 |
+| 5 | supervision, prov. | **Code merged**: the teardown (MAST_supervision#24), session (#25), service (#29), installer (#28), the supervisor's `--service` (#30). **Installed through provisioning on supervised units**: the registry's `supervised` flag (`StrictBool` or `None`, absent read as false; MAST_provisioning#261); the `mast-service` provider (order 2220) runs the installer on a supervised unit and removes the service on any other, and never starts it; `mast-services-standdown` (20) stops it at the start of every run, never deleting it; `mast-services-finalize` (9500) starts it on a supervised unit and asserts it absent otherwise (#262). A run that dies outright leaves it stopped until the next run or a reboot; the driver does not restart it, since a timed-out run may still be executing. **Not yet deployed**: the supervision pin moves first. Accepted on the labcomp2 dev VM, then on the pilot units — tentatively mast06 and mast07, with their own go-ahead (team decisions, 2026-11-12, tentative). Rollback: unflag the unit and run, which removes the service; by hand, `install-mast-service.ps1 -Uninstall` |
 | 6 | unit | the §9 deletions and the PHD2 fix; PHD2 flips from observed to supervised |
 | 7 | spec | mirror stage 6 |
 | 8 | common | delete `WatchedProcess`, `log_stream`, `kill_process_by_name`, and (after a cross-repo grep) `ensure_process_is_running` |
@@ -974,3 +1061,28 @@ decision. **The status port is the one-supervisor lock** (§7), replacing the ro
 would leave a supervisor nobody can see running beside a stale one that answers. A live holder
 now aborts the new supervisor, a `STOPPING` one is waited for, and a dead or wedged supervisor is
 killed and taken over, in any login session. The window keeps the never-die rule.
+
+**Revised 2026-10-22**, to what MAST_supervision#18 built (§7, §14). The supervisor revives a lost
+`D:` by running provisioning's SYSTEM task `\mast-ramdisk-restart`, since the unelevated
+supervisor cannot detach a disk itself; and the action listener on `127.0.0.1:8005` is claimed
+like the status port and is just as required.
+
+**Revised 2026-10-25**, for MAST_supervision#21 and MAST_provisioning#254 (§5, §10). The RAM-disk
+check compares the index folder, by name and size, with provisioning's manifest,
+`C:\MAST\state\mast-indexes.json`; `index_series` and `index_count` are no longer read.
+
+**Revised 2026-11-17**, stage 5's code merged, against MAST_supervision `main` @ `51c369c` and
+MAST_provisioning `main` @ `55b619e`. Team decisions of 2026-11-12, tentative, taken in the stage 5
+implementation plan: the service spawns the supervisor with `CREATE_NO_WINDOW` rather than
+`CREATE_NEW_CONSOLE`, so no console close button can kill it (§4); the session bridge is pywin32
+only, and a test forbids `ctypes` (§2, §4); the supervisor's children break away from the
+service's job only under `--service` (§4); `service.py` holds a `Global\mast-service` mutex while
+the supervisor keeps the port lock (§2); a service stop tears down the app, PHD2, PWI4 and ps3cli
+in that order, stopping PHD2 although it is observed, and sends a started-up unit app its
+`shutdown` first (§7); the window's close hint names `sc stop mast-service` under the service (§7);
+acceptance moves from mast00 to the labcomp2 dev VM and then to pilot units, mast06 and mast07
+(§11, §15); and a run that dies outright leaves the service stopped (§15). The installer's stop
+parameters are set explicitly (§3). Provisioning's superseding decision is MAST_provisioning#262
+(§3, §12), and autologon on mast00 and mastw is dropped with them out of provisioning (§12). Still
+not built, and marked so: the Actions menu and its modals, restart-to-apply, the per-row buttons,
+and §13's change callback and Apply item.
