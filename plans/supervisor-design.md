@@ -8,7 +8,7 @@
 > `GET /status` on port 8004.
 >
 > **Status: stages 0–3 built, except the window's Actions menu; stage 5 code merged, not yet
-> deployed** — MAST_supervision #24, #25 and #28–#30, MAST_provisioning #261 and #262. The
+> deployed** — MAST_supervision #24–#26 and #28–#30, MAST_provisioning #261 and #262. The
 > clone manifest still pins supervision at `395f7f8`, before stage 5, so no unit runs
 > `mast-service` until that pin moves. What is not built is marked so where it is described.
 > Design questions closed but one — what maintenance does on the machine, reopened by the
@@ -339,7 +339,8 @@ mount is unplugged must not be restarted eight thousand times a night.
 **A stop is final** (`ManagedProcess.stop()`, MAST_supervision#24): the restart path's terminate,
 grace, kill, and then no respawn. The row ends **`stopped`** (WARNING), or `blocked` when the
 program refuses terminate or survives kill. `release()` undoes it: the program is looked for, and
-started, again. The service's teardown (§7) is its caller.
+started, again. Its callers are the service's teardown (§7) and a hold requested on the loopback
+listener (§7, *The status API*).
 
 **`not_supervised` is a distinct state, not a flavour of unhealthy.** VSCode under `development`
 (§8) is launched once and never restarted, so "not running" is its normal resting condition.
@@ -647,15 +648,36 @@ interval so "fresh" is judged against the interval in force, not the default.
 same routine and the same rules; a supervisor that cannot have either does not start, and closes
 whatever it had claimed. It serves `/status` too, so a successor reads either port's holder alike,
 and on stop it closes first, so a successor that finds 8004 free finds 8005 free too. A spec
-supervisor claims it as well, with no action route on it.
+supervisor claims it as well and serves the program routes below on it; only the RAM-disk route
+is unit-only.
+
+**A supervised program can be held down from the action listener** (MAST_supervision#26; team
+decision, 2026-11-12, tentative): `PUT /mast/api/v1/supervisor/programs/{name}/stop` and
+`…/start`, on every role. Under supervision, killing a program by hand no longer keeps it down —
+the supervisor restarts it — so this is the way to hold PWI4 or ps3cli down without stopping the
+whole service. A request is checked against the published snapshot and queued; the loop
+applies it at its next tick, so no request thread touches a row. **`202`**: queued, and `/status`
+shows the outcome — the row `stopped` (§6) and the name under the snapshot's `held`. **`404`**: no
+program of that name, or the configuration has not loaded yet. **`409`**: observed or not
+supervised, so not the supervisor's to stop — PHD2, which the app starts, VSCode, and a
+`development` app. `start` releases the hold. **A hold is not remembered**: a supervisor that
+restarts starts every program again (team decision, 2026-11-12, tentative). The window's per-row
+stop and start buttons and a traffic light per row, calling the same control, are design intent,
+not yet built, and do not gate the pilot.
+
+**Known gap, open — a hold on a started-up app.** `stop` on the app (a `production` app is
+supervised, so it is accepted) terminates it directly, with none of the teardown's
+shutdown-first (§7, *Two shutdown flavours*): a started-up unit is left with its covers and mount
+as they were, and nothing then watches them. Do not use the hold to take a started-up production
+app down; send it `shutdown` first. No code fix has been decided.
 
 **Read-only, and the binding enforces it.** §13's boundary — *the supervisor is a console at the
 telescope, not a remote-control surface* — survives a read-only endpoint intact. But `/status` is
 exactly where someone will later want `POST /opmode`, and §13's argument applies to an HTTP verb
 identically: a physical event must not be the silent consequence of someone saving a form. So
 **the read route binds `0.0.0.0` and every action route binds `127.0.0.1` only**, on its own
-listener — status readable fleet-wide, the operator verbs and `PUT /ramdisk/restart`
-(filing-areas-design §8.1) physically-present-only. That makes the boundary
+listener — status readable fleet-wide, the operator verbs, `PUT /ramdisk/restart`
+(filing-areas-design §8.1) and `PUT /programs/{name}/stop|start` physically-present-only. That makes the boundary
 mechanical rather than a convention, and it closes the door before anyone opens it. Say so in
 `api.py`'s module docstring.
 
@@ -1086,3 +1108,10 @@ parameters are set explicitly (§3). Provisioning's superseding decision is MAST
 (§3, §12), and autologon on mast00 and mastw is dropped with them out of provisioning (§12). Still
 not built, and marked so: the Actions menu and its modals, restart-to-apply, the per-row buttons,
 and §13's change callback and Apply item.
+
+**Revised 2026-11-17**, for MAST_supervision#26, one team decision of 2026-11-12, tentative.
+**A supervised program can be held down** through `PUT …/programs/{name}/stop` and `/start` on
+the loopback action listener (§6, §7), built before the pilot because under supervision a killed
+program comes back; a hold is listed under `held` in the snapshot and forgotten when the
+supervisor restarts. A hold on a started-up app skips its `shutdown`, an open gap (§7). The
+window's buttons and traffic light stay design intent, not gating.
