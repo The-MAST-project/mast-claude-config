@@ -236,6 +236,12 @@ The gate reads the machine's opmode through `OpmodeBase.opmode`, which is resolv
 startup and does not change while the app runs ([opmode.py](../../common/opmode.py)). Only
 component scope depends on it (§4.1).
 
+**The gate does not keep a production unit in standby.** Autostartup (MAST_unit#395) is unit-scope:
+`expose`, `focus_on_star` and the other eight routes that declare it start a production unit up —
+covers opened, mount homed — before doing the work, and the gate, which keys only component scope on
+the opmode, would not refuse them for it. Accepted (team decision, 2026-11-12, tentative); see
+opmode-design §3.
+
 The production/development names make the rule self-describing — production: governed by the
 controller, gated; development: an engineer driving components. They replaced `controlled` /
 `operated` on 2026-10-12 (MAST_common#153 and its DECISIONS entry). The old values are still read
