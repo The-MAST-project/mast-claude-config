@@ -15,20 +15,23 @@ is for the **acquisition phase**, where the fold mirror is out of the frame and 
 measured. With the mirror in, the target on the fibre is always inside the mirror's shadow (see
 `inhouse_guiding_design.md` 11.4), which is a different measurement.
 
-## Ground truth and its limit
+## Ground truth and the estimator
 
 The reference is a Gaia DR3 star's catalog position, with proper motion applied to the observation epoch. The image
-position of the star is measured by a centroid estimator, so the error is *WCS(star's centroid) minus Gaia*. Two
-estimators give different positions for the same star:
+position of the star is measured by a centroid estimator, so the error is *WCS(star's centroid) minus Gaia*.
 
-- **Fixed-window** (`winpos`: a Gaussian-weighted centroid with one fixed width, about the seeing). It follows the
-  core of the star and does not depend on brightness. It is also what `selective` fits with.
-- **First moment** (the intensity-weighted mean over the detected pixels). It includes the wings and a coma tail, and its
-  size depends on the star's brightness.
+**Decided 2026-11-22: the estimator is the fixed window** (`winpos`: a Gaussian-weighted centroid with one fixed width,
+about the seeing), to match astrometry.net's own extractor as closely as possible. It follows the core of the star,
+does not depend on brightness, and is what `selective` fits with.
 
-Near the fibre on mast02 they differ by about 0.3 arcsec, along +Dec. That is as large as the difference between the
-modes. **So a star's centroid is not an absolute truth for the fibre**: the fibre collects the light in its aperture,
-and which estimator describes that is not known. The on-sky test below is what settles it.
+astrometry.net's `image2xy` fits a Gaussian to a small patch around each peak, so it also follows the core. Measured on
+3,599 stars that `original`'s fit used (24 mast02 frames, paired to our clean stars within 4 px), its positions differ
+from the fixed-window ones by 0.00 arcsec overall and by **0.10 arcsec south within 1000 px of the fibre**, with a
+frame-to-frame scatter of 0.04 to 0.05 arcsec.
+
+So the estimator is *not* what makes `original` differ from `selective`. About 0.1 arcsec of `original`'s offset is the
+0.1 arcsec between its extractor and the fixed window; the rest is the fit. What the fibre actually responds to
+(the core, or the light-weighted centre) is still not known, and the on-sky test below is what settles it.
 
 ## The pilot (done)
 
@@ -48,18 +51,19 @@ and which estimator describes that is not known. The on-sky test below is what s
 
 **Results, offset in arcsec (median vector's length), stars pooled over 19 to 20 frames, standard error about 0.02:**
 
-| Distance from fibre | Stars | `original`, fixed-window | `selective`, fixed-window | `original`, first moment | `selective`, first moment |
-| --- | --- | --- | --- | --- | --- |
-| 0-300 px | 126 | 0.52 (0.00 E, +0.52 N) | 0.17 (-0.11, +0.13) | 0.83 | 0.46 |
-| 300-500 px | 232 | 0.49 | 0.18 | 0.79 | 0.49 |
-| 500-800 px | 369 | 0.46 | 0.16 | 0.66 | 0.36 |
-| 800-1200 px | 811 | 0.35 | 0.01 | 0.53 | 0.19 |
-| 1200-1800 px | 2,163 | 0.10 | 0.09 | 0.25 | 0.07 |
+| Distance from fibre | Stars | `original` | `selective` |
+| --- | --- | --- | --- |
+| 0-300 px | 126 | 0.52 (0.00 E, +0.52 N) | 0.17 (-0.11, +0.13) |
+| 300-500 px | 232 | 0.49 | 0.18 |
+| 500-800 px | 369 | 0.46 | 0.16 |
+| 800-1200 px | 811 | 0.35 | 0.01 |
+| 1200-1800 px | 2,163 | 0.10 | 0.09 |
 
-- Per frame, stars within 600 px of the fibre: `selective` is closer to Gaia in 18 of 19 frames (fixed-window) and
-  20 of 20 (first moment). The one tie is frame 04. The median per-frame offset is 0.50 against 0.19 arcsec
-  (fixed-window) and 0.81 against 0.44 (first moment).
-- **The gap, about 0.35 arcsec in favour of `selective`, holds with both estimators.** The absolute offsets do not.
+- Per frame, stars within 600 px of the fibre: `selective` is closer to Gaia in 18 of 19 frames; the one tie is frame
+  04. The median per-frame offset is 0.50 arcsec for `original` and 0.19 for `selective`.
+- **The gap near the fibre is about 0.35 arcsec in favour of `selective`.** About 0.1 arcsec of `original`'s
+  0.52 arcsec is the mismatch between its extractor and the fixed-window scoring, leaving a gap of about 0.25 arcsec
+  (0.42 against 0.17) that is the fits themselves: the SIP order, and 267 stars against 22.
 - Both modes sit north of Gaia (almost no east-west offset). `original`'s 0.52 arcsec is almost exactly one binned
   pixel (0.523 arcsec); coincidence or a pixel-origin convention is **not** established.
 - Whole frame, for the record: the median per-star error ties (0.45 against 0.46 arcsec), and `selective`'s 90th
@@ -68,8 +72,8 @@ and which estimator describes that is not known. The on-sky test below is what s
 
 **What the pilot does not show**
 - It is star positions against Gaia, not the fibre.
-- The `selective` fit and the fixed-window scoring use the same centroid, so a centroid bias cancels for `selective`
-  and not for `original`. The first-moment run only partly answers this.
+- The `selective` fit and the fixed-window scoring use the same centroid. For `original` the mismatch is small and
+  measured (about 0.1 arcsec near the fibre, above), so this advantage to `selective` is bounded by it.
 - The 24 frames come from about 10 fields, so the standard errors, which treat stars as independent, are optimistic.
 - Frames 19 to 22 have few stars (6 to 26 held out). One frame (the 2 s one) did not solve.
 - One unit, mast02. **mast01 cannot be scored this way from its traverse frames**: those are mirror-in `spec` frames,
@@ -81,7 +85,7 @@ and which estimator describes that is not known. The on-sky test below is what s
 
 ## The on-sky survey (next)
 
-The one measurement that resolves the estimator question: put a Gaia star on the fibre and measure how its light
+The one measurement that settles which position the fibre responds to: put a Gaia star on the fibre and measure how its light
 couples, against where the solved WCS says the fibre is.
 
 1. **Targets.** 15 to 20 isolated Gaia stars, G about 8 to 11 (below the saturation margin), low proper motion, no
@@ -93,15 +97,17 @@ couples, against where the solved WCS says the fibre is.
 3. **Both modes on the same frames**, offline, so only the solver differs.
 4. **Decision criterion, set before looking.** `selective` becomes the default if its offset at the fibre (the
    median vector within 500 px, with the fibre-response position as the truth) is smaller than `original`'s by at
-   least two standard errors on every unit tested, **with both centroid estimators**. Otherwise it stays opt-in, and the
-   units where it loses are examined first.
+   least two standard errors (over frames, not stars) on every unit tested. Otherwise it stays opt-in, and the units
+   where it loses are examined first.
 
 ## Harness
 
 A standalone `tools/gaia_accuracy_survey.py` in MAST_unit. The pilot's analysis becomes its `analyse` step first,
 since it needs no telescope time:
 
-- `analyse`: the pilot's held-out scoring, with the centroid estimator chosen by a flag and per-star output.
+- `analyse` (**built 2026-11-22**, `tools/gaia_accuracy_survey.py`, with its tests): the pilot's held-out scoring,
+  with the fixed-window centroid, per-star output, standard errors over frames as well as stars. It reproduced the pilot's numbers exactly. It reads the layout `tools/source_survey.py
+  --via-solver` leaves, which is on a branch that is not merged yet, and it needs the Gaia catalog share.
 - `plan`: choose targets for a unit and a night from the Gaia catalog.
 - `acquire`: on the unit, slew, offset, expose, and save frames with a sidecar of target, offset and time.
 
@@ -109,6 +115,7 @@ since it needs no telescope time:
 
 - **Units and nights.** Not chosen. mast02 is the best documented for acquisition frames; mast01 would need its
   acquisition-phase frames.
-- **Which estimator describes the fibre?** Only the on-sky test decides.
+- **Which estimator describes the fibre?** The fixed window is chosen to match astrometry.net, not because it
+  describes the fibre; only the on-sky test decides that.
 - **mast02 frames 04 to 06**, where `selective` is clearly worse, and the **one-pixel offset of `original`**.
 - **Epoch.** The pilot used the exposure start, not mid-exposure; negligible at 5 s.
