@@ -174,7 +174,8 @@ MountCorrector  (PWI4 mount_offset + Mount.wait_until_settled)
   (peak < `saturation_adu`), SNR ≥ `min_snr` (PHD2 default 3.0), not within N px
   of the ROI edge, not a hot pixel (HFD > ~1.5 px), and **outside the fiber
   exclusion zone** (SpecRoi geometry from `Guider.make_guiding_settings`,
-  `guiding.py:99`).
+  `guiding.py:99`). **Also outside the fold-mirror shadow and inside the low-coma disk,
+  by the source-selection passes of §11.4 (decided 2026-11-22).**
 - **Lost-star detection** — SNR below threshold *or* star **mass change** beyond
   `mass_change_threshold` (PHD2 default 0.5) between frames; mass-change catches
   clouds / fiber occlusion that SNR alone misses. **v1: stop + report**; **v2:
@@ -191,7 +192,7 @@ MountCorrector  (PWI4 mount_offset + Mount.wait_until_settled)
 - **Backlash compensation initially** — PWI4 direct-drive mounts should have
   negligible backlash, and the min-move dead-band prevents Dec direction-hunting
   anyway. Revisit only if on-sky Dec oscillation appears (§9).
-- **Multi-star guiding** — a v2+ SNR improvement, not v1.
+- **Multi-star guiding** — a v2+ SNR improvement, not v1. **Superseded by §11 (2026-11-16): the agreed direction is a fixed set of several stars chosen from the reference frame.**
 
 ## 5. Correction strategy
 
@@ -355,7 +356,7 @@ hardware):
    GUI?); affects the rename timing and payload compatibility.
 5. **Mount backlash reality** on the deployed PlaneWave mounts — confirm the
    no-backlash assumption.
-6. **Multi-star guiding** as v2 — in or out of the roadmap.
+6. **Multi-star guiding** as v2 — in or out of the roadmap. *(Answered by §11: in, as a fixed star set; the estimator is open, 11.5.)*
 
 ---
 
@@ -410,8 +411,40 @@ and what has to be measured before building it.
   improves, a blend whose separation changes with seeing, or a star near the shadow whose shift
   flips with focus is a bad guide star. Also the fibre exclusion zone (§4) and an edge margin,
   because the mount drifts and stars leave the box.
-- **Skip:** ranking by `coma_px` and widening the radius to reach 30 stars. That is tuned to
-  absolute astrometry. For guiding take whatever clean stars the ROI has.
+- **Also take the coma cut (decided 2026-11-22).** Prefer stars inside the low-coma disk (`low_coma_radius` about the
+  unit's optical centre) and drop the ones outside it. Coma cancels in a differential measurement (11.2), but
+  coma-affected stars respond differently when seeing or focus changes, and the loop should not rest on them.
+  The radius is a cut, not a ranking: take whatever clean stars the disk holds. Do **not** widen it to reach 30
+  stars as the astrometry selection does; with too few stars, say so (risk 1) instead of admitting coma-affected ones.
+- **How.** Run the same `select_sources` pass, shadow detector and hot-pixel mask on the reference frame, in the
+  guide region's geometry, once, and keep the survivors. Three consequences (the first two are decisions of
+  2026-11-22):
+  1. **The fibre is always inside the shadow, so the guide stars are never in the ROI's middle.** The target on the
+     fibre sits in the fold mirror's shadow by construction (its light has to reach the fibre). A small ROI centred
+     on the fibre therefore lies inside the band, and the guide stars must come from **outside** it. **Measured on
+     mast01 (20 traverse `spec` frames, 2026-10-25, 10 s, shadow centred about 280 px right of the frame centre
+     and so over the fibre pixel at 4401): the umbra half-width is about 1,330 px and the penumbra half-width about
+     1,960 px**, i.e. the band is about 3,900 px wide, nearly half the 8,288 px frame. The geometric low-coma radius
+     is 0.25 of the short side, about 1,400 px. The disk about the fibre therefore lies **entirely inside the
+     penumbra: in all 20 frames the number of clean (kept or spare) stars within 1,411 px of the fibre pixel is
+     zero** (2 to 10 stars there are rejected as shadow, 31 to 55 for other reasons). The frames hold only 15 to
+     22 clean stars in all, every one more than about 2,000 px from the fibre. **Avoiding the shadow and avoiding
+     coma cannot both be satisfied on mast01 with the geometric radius.** One of them has to give: a larger coma
+     radius, a different centre, or a smaller exclusion (the penumbra is only partly dark, and the astrometry
+     selection treats the exclusion half-width as a tunable, 0.5 to 2 penumbrae). The guide region is also not
+     a small box about the fibre: its stars are at least about 8 arcmin away, which lengthens the lever arm of 11.6
+     risk 3. (mast02's acquisition frames show a much narrower shadow, umbra 580 px and penumbra 1,040 px, but
+     about 3,100 px from the frame centre, not over the fibre pixel (4050, 2439); there 194 clean stars lie inside
+     the disk at the median. Those are acquisition-phase frames, where the mirror is out of the frame (confirmed
+     2026-11-22), so they do not stand for the guider: the guiding configuration is the one measured on mast01.)
+  2. **The coma disk is centred on the fibre position from the config DB**, the result of the in-lab calibration. It is
+     used as the centre of the coma cut and of the guide region. This assumes that the optical axis is near that
+     pixel. The optical-centre survey (on hold) compared a finder's centres with the DB's; it is a different question
+     and does not change this decision.
+  3. **The measured coma is mild here.** On mast03 sky-quality frames out to 30% of the frame (69 stars), star
+     ellipticity and FWHM showed no growth with distance from the fibre pixel, and the long axes were not radial. That
+     bounds how much the cut can buy; it does not remove the need for it at larger radii, where a hint of a radial
+     pattern appeared beyond 1,300 px (2.7 sigma).
 
 ### 11.5 Two forms of "correlation"
 
@@ -468,6 +501,58 @@ distrusted. An optional layer shows the stars the hard rejects dropped, labelled
 5. What the loop does when too few stars remain, or the scatter is too high: hold corrections
    (this fits v1 "stop and report" of §4), and when to give up.
 
+### 11.9 Literature check on correlation guiding (2026-11-22)
+
+*A web-research pass on whether correlation beats centroiding for guiding, with each claim checked by three
+independent readers (15 claims confirmed, 10 refuted). **The result is thin on guiding itself.** It covers the
+registration toolbox and a little PHD2 behaviour. It does not settle 11.5 (whole-frame correlation or per-star
+stamps) and gives no published accuracy comparison of correlation guiding against centroid guiding on star fields.*
+
+**What is established**
+
+- **Correlation is unbiased under a uniform background; a centroid is not.** A centroid's background bias lowers its
+  effective gain (OSTI report on wavefront sensing, not guiding). Background subtraction reduces the centroid's bias
+  too. It says nothing about gradients or patchy cloud. Two related claims from the same report were refuted (gain
+  varying 0.5 to 0.8 with spot size, and correlation being 1.9 to 4 times noisier for sub-pixel spots), so the
+  argument that correlation is immune to seeing-dependent gain is **not** established.
+- **`skimage.registration.phase_cross_correlation`** is the upsampled-matrix-DFT method of Guizar-Sicairos, Thurman and
+  Fienup (Opt. Lett. 33, 156, 2008). `upsample_factor` sets a grid resolution of 1/factor pixel; it is not an
+  accuracy. The default of 1 returns whole pixels. Its default **phase normalisation is not robust to noise**; the
+  documentation suggests `normalization=None` at low SNR, which is our case (faint stars, 1 to 3 s). No benchmark is
+  given. Whether this suits our frames is an inference to test.
+- **How the correlation peak is refined matters.** A 3x3 parabolic fit is biased towards whole pixels, with an
+  error plateau near 0.05 px (Townson et al., MNRAS 2015, solar adaptive optics). A thresholded, windowed centre of
+  mass with tuned threshold and window did about 3 times better in the same simulation; a threshold too high or a
+  window too small brings the bias back. Feng et al. (arXiv 1804.00174) propose a "modified moment" centroid of the
+  correlation surface for low-SNR images. All of this is solar or generic imaging, not star fields.
+- **PHD2 multi-star.** With a small sub-frame (35x35 px in the developer's example) the camera returns one region tied to the
+  primary star, so the secondary stars are lost; multi-star needs sub-frames off. That matters for a small ROI on the
+  fibre. Secondary stars can be dropped during a session, so the star count at the start is not kept all night. After
+  losing the guide star, PHD2 searches only the original search region, never the whole frame. (Forum posts by PHD2
+  developers, 2016 to 2022; possibly out of date.) PHD2's hysteresis algorithm works on an already-measured offset
+  (manual), so a correlation measurement could reuse it. That is our inference, not a PHD2 claim.
+
+**What it does not tell us** (open; none was verified)
+- Measured accuracy and bias of whole-ROI correlation against per-star stamps against centroids on real star
+  fields, with coma and changing seeing.
+- How Ekos/KStars, SGP, ASTAP or lunar and planetary guiders choose and refresh a reference, handle rotation and scale
+  drift and detect loss of signal, and what accuracy they report.
+- Which masking, background removal and windowing keep a small fibre-centred ROI stable under patchy cloud or a
+  cloud-lit background; whether per-star scatter is a reliable health signal; the latency of upsampled-DFT
+  correlation on a small ROI at 1 to 3 s.
+
+**What this means for 11.5.** Nothing in the verified evidence favours whole-frame correlation over per-star stamps
+for us, and it adds two things to check on our own frames: `normalization=None`, and a refined peak by windowed
+centre of mass instead of a parabola. The cheapest way to settle it is the replay harness of §8: run all three
+estimators on saved guide-ROI series from a unit and compare their scatter.
+
+**A related finding from the Gaia pilot (an offline run on 24 mast02 frames, not yet written up; the survey plan is
+`mastrometry_gaia_accuracy_survey.md`).** Near the fibre on mast02, the
+star positions of one frame shift by about 0.3 arcsec, along +Dec, when the centroid estimator changes (fixed window
+against first moment). A guider is differential, so that bias cancels as long as the reference and every
+later frame use the same estimator, as 11.2 says. It is another reason never to mix estimators between the reference
+and the loop.
+
 ---
 
 *Provenance: research and design 2026-07-21 (mast02). PulseGuide findings from
@@ -475,4 +560,4 @@ read-only inspection of the local PW ASCOM driver + PWI4, PW's HTTP API
 document, the PWI4 CHANGELOG, and the open-phd-guiding list. Code references to
 `MAST_unit` branch `calibration`.*
 
-*§11 added 2026-11-16 from a design discussion of guiding on stars chosen from the reference frame; it draws on `mastrometry_source_selection_design.md` and `fold-mirror-handover-design.md`.*
+*§11 added 2026-11-16 from a design discussion of guiding on stars chosen from the reference frame; it draws on `mastrometry_source_selection_design.md` and `fold-mirror-handover-design.md`. §11.9 added 2026-11-22 (literature check).*
