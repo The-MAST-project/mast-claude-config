@@ -14,7 +14,7 @@ Nov 16, 2026 · Arie Blumenzweig
 
 ## Summary
 
-MASTrometry should solve from a source list we extract and filter ourselves, measured with a **fixed-window centroid**, instead of letting astrometry.net extract sources from the image. The centroid method matters more than any single cut. In simulation, photutils' first-moment centroid (`x_centroid`) moves the solved fibre pointing by about 0.24″ between a faint-star field and a bright-star field. A fixed-window centroid cuts that to about 0.005″.
+MASTrometry should solve from a source list we extract and filter ourselves, measured with a **fixed-window centroid**, instead of letting astrometry.net extract sources from the image. The centroid method matters more than any single cut. In simulation, a fixed-window centroid moves the solved fibre pointing by only about 0.005″ between a faint-star field and a bright-star field (a peak centroid like image2xy's, 0.02″).
 
 The filter then removes the sources that bias the fit while still being matched: stars in or near the fold-mirror shadow, saturated stars, blends, stars cut off by an edge, and hot pixels. Among the rest, it prefers stars inside the low-coma disk, keeping at least 30 when the field allows.
 
@@ -24,7 +24,7 @@ The filter then removes the sources that bias the fit while still being matched:
 
 `MastrometryDotNet._solve_in` (`src/solvers/mastrometry.py`) crops to the phase ROI, block-averages 2×2 in numpy, writes a FITS file, and runs `solve-field` on the image. astrometry.net then finds the sources itself, so none of the unit's shadow, coma or saturation knowledge reaches the solver.
 
-- **Extraction.** The built-in image2xy fits a Gaussian to the 3×3 patch around each peak ([Lang et al. 2010](https://arxiv.org/abs/0910.2233)), so its positions follow the peak, not the first moment.
+- **Extraction.** The built-in image2xy fits a Gaussian to the 3×3 patch around each peak ([Lang et al. 2010](https://arxiv.org/abs/0910.2233)), so its positions follow the core of the star. Measured on 24 mast02 frames (Gaia pilot, 2026-11-22), they agree with the fixed-window centroid used here to about 0.1″ near the fibre.
 - **Ordering and uniformity.** Sources are resorted by brightness, `removelines` drops sources along rows or columns, and `--uniformize` (default 10) thins them to a spatially even subset.
 - **Verification.** Stars are checked brightest first. An unmatched source counts as a distractor under a uniform term, so stray detections weaken a match but rarely break it. `--pixel-error` defaults to 1 px, which is 2 full-resolution px after binning ([solve-field man page](https://www.mankier.com/1/solve-field)).
 - **Tweak.** SIP is fitted to the matched stars, order 2 by default. `mastrometry.py` keeps tweak on deliberately (see `solvers/CLAUDE.md`).
@@ -41,20 +41,19 @@ Coma pulls the centroid outward from the chief ray. A parabola's geometric coma 
 
 Radial centroid offset from the chief ray, in px, for a faint star (SNR ≈ 15–45) and a bright one (SNR ≈ 500–4000):
 
-| Field radius | First moment (photutils `x_centroid`) | Fixed window (`sep.winpos`, σ = FWHM/2.355) | Peak (image2xy-like, bin 2) |
-| --- | --- | --- | --- |
-| 1000 px | 5.5 → 6.9 | 4.9 → 4.9 | 4.0 → 4.0 |
-| 2000 px | 6.5 → 13.9 | 6.7 → 6.6 | 5.7 → 4.7 |
-| 3000 px | 6.6 → 20.8 | 7.2 → 7.4 | 6.6 → 5.1 |
-| 4000 px | 11.1 → 27.6 | 7.3 → 9.4 | 5.6 → 5.1 |
+| Field radius | Fixed window (`sep.winpos`, σ = FWHM/2.355) | Peak (image2xy-like, bin 2) |
+| --- | --- | --- |
+| 1000 px | 4.9 → 4.9 | 4.0 → 4.0 |
+| 2000 px | 6.7 → 6.6 | 5.7 → 4.7 |
+| 3000 px | 7.2 → 7.4 | 6.6 → 5.1 |
+| 4000 px | 7.3 → 9.4 | 5.6 → 5.1 |
 
-The first moment has a magnitude equation of up to 17 px. The fixed window is flux-independent out to about r = 3000 px. photutils' `x_centroid_win` is **not** equivalent: it sizes its window from each source, so coma'd stars get larger windows (9.6 → 10.0 px at r = 2000, 14.6 → 18.3 px at r = 4000).
+The fixed window is flux-independent out to about r = 3000 px. photutils' `x_centroid_win` is **not** equivalent: it sizes its window from each source, so coma'd stars get larger windows (9.6 → 10.0 px at r = 2000, 14.6 → 18.3 px at r = 4000).
 
 Effect on the solved fibre position, spec ROI of 4800 × 3200 px around the fibre, 60 stars, SIP order 2:
 
 | Centroid | Scatter, whole ROI | Scatter, inside r < 1500 px | Shift between a faint and a bright field |
 | --- | --- | --- | --- |
-| First moment | 0.11″ | 0.04″ | 0.24″ |
 | Fixed window | 0.07″ | 0.025″ | 0.005″ |
 | Peak | 0.10″ | 0.06″ | 0.02″ |
 
@@ -238,7 +237,7 @@ before that change have a single `spec` folder.
 
 **Step 1: residual maps (the truth test).** Solve each frame with a loose, conservative selection. Project Gaia DR3 stars (propagated to the observation epoch) through the WCS, match them, and plot residuals against:
 
-- **r from the optical centre, split by flux**, for each centroid method. Expect a magnitude equation for the first moment and none for the fixed window.
+- **r from the optical centre, split by flux**, for the fixed-window and the peak centroid. Expect no magnitude equation for the fixed window.
 - **Distance across the shadow band (s), split by focus offset**, from the focus sweep. This sets `max_shadow_deficit` and tests whether the shift flips sign with focus.
 - **Peak / full scale.** This sets `sat_frac`.
 - **Nearest-neighbour distance**, which sets `min_sep`, and **SNR**, which sets `min_snr`.
