@@ -546,12 +546,11 @@ for us, and it adds two things to check on our own frames: `normalization=None`,
 centre of mass instead of a parabola. The cheapest way to settle it is the replay harness of §8: run all three
 estimators on saved guide-ROI series from a unit and compare their scatter.
 
-**A related finding from the Gaia pilot (an offline run on 24 mast02 frames, not yet written up; the survey plan is
-`mastrometry_gaia_accuracy_survey.md`).** Near the fibre on mast02, the
-star positions of one frame shift by about 0.3 arcsec, along +Dec, when the centroid estimator changes (fixed window
-against first moment). A guider is differential, so that bias cancels as long as the reference and every
-later frame use the same estimator, as 11.2 says. It is another reason never to mix estimators between the reference
-and the loop.
+**A related finding from the Gaia pilot (an offline run on 24 mast02 frames; the survey plan is
+`mastrometry_gaia_accuracy_survey.md`).** Near the fibre, the fixed-window centroid that the source selection uses agrees
+with astrometry.net's own extractor (`image2xy`) to about 0.1 arcsec. A guider is differential, so an estimator's bias
+cancels as long as the reference frame and every later frame use the same estimator, as 11.2 says: do not mix
+estimators between the reference and the loop.
 
 ---
 
