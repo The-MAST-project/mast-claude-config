@@ -116,14 +116,13 @@ MountCorrector  (PWI4 mount_offset + Mount.wait_until_settled)
   `wait_for_image_ready` → `image_array` → tracker → policy → corrector → repeat
   at `cadence_seconds`. Frames captured *during* a correction+settle window are
   discarded (no measurement while the mount moves).
-- **Validation, interleaved in the same loop** — every `validation.interval`,
-  the loop substitutes one full-frame (or large-ROI) exposure, hands it to the
-  configured solver, and (a) refreshes the pixel→sky rotation from the solve
-  WCS, (b) on out-of-tolerance either applies a drift correction via the
-  existing `solve_and_correct` machinery or raises an alarm
-  (`validation.action`). **No stop/resume dance** — we own the camera; guiding
-  merely skips a centroid cycle for the solve. This replaces today's inert
-  `"WHAT TO DO?"`.
+- **Validation, in the same loop, in the background** (§3.3) — the guider exposes **full frames, binned 2x2**, every cycle,
+  and tracks its guide stars in a **region** of them about the fibre. Every `validation.interval_seconds` (default 60 s) a
+  **background thread** extracts sources from the same region of the current frame, selects them with the **shadow model
+  detected once at the reference**, and solves them as an xylist. The solved offset of the fibre, less the loop's own
+  displacement in the same frame, **shifts the guide reference**, and the regular loop absorbs it. No `solve_and_correct`, no
+  second mount motion, no separate validation exposure. If the fibre is more than 1.5 times the tolerance out of position
+  the guider raises an alert. This replaces today's inert `"WHAT TO DO?"`.
 - **`StarTracker`** (`star_tracker.py`) — pure ndarray-in, measurement-out.
   Reuses `calibration/analysis/hfd.py`: `_detect` for initial star selection,
   `half_flux_diameter` (flux-weighted centroid + HFD per stamp) as the
@@ -154,6 +153,136 @@ MountCorrector  (PWI4 mount_offset + Mount.wait_until_settled)
 | Imaging | `ZWOImager` — already `ImagerInterface`-complete bar a few stubs (Stage 0) |
 | Cooler | `ZWOImager` (on/off/power/temp; needs a config-driven set-point setter) + `stamp_cooling` generalized out of `src/phd2/` |
 | Seeing telemetry | guide loop feeds `(snr, hfd)` per frame into `science/sky_quality.py`, which already consumes an externally-measured `hfd_pixels` |
+
+### 3.1 Frames stay in memory (decided 2026-11-22)
+
+The ZWO imager can capture to memory (`can_image_to_memory`, `image_array`, `wait_for_image_ready`); PHD2 cannot, it
+writes a file. The in-house stack uses that: **whenever possible no intermediate file is written.** The calibration
+phases already work this way (`focus_on_star` and the focuser sweep take the array when the imager can, a path only when it
+cannot); the guiding and solving path does not.
+
+**What one guiding solve writes today** (`Solver.solve` / `solve_and_correct`, `MastrometryDotNet`): the exposure is saved as
+a FITS on the RAM disk (`imager_settings.image_path` is required, and a missing path raises `SolverError`); the solver reads
+it back; writes a 2x2-downsampled copy as `solve-field`'s input; may write an xylist and the star-map files; writes
+`-solver_result.json`; and then moves the frame and the JSON to the share (`move_ram_to_shared`). Per correction cycle,
+that is two or three files, and a full-frame image across the network.
+
+**What the in-house stack does instead**
+
+1. **The guide loop's frames never touch disk.** The centroid loop works on `image_array`. An every-Nth-frame save, and a save
+   on an anomaly (star lost, scatter high), are the only writes, for diagnosis (see §9 on the save thread).
+2. **A validation solve takes the array.** The frame goes to the solver in memory. On the `selective` route the sources are
+   chosen in memory and only the xylist, a few kilobytes on the RAM disk, is written for `solve-field`. On the `original`
+   route `solve-field` needs an image file, so the 2x2-downsampled copy is written to the RAM disk and deleted after: the
+   only unavoidable intermediate file, a quarter of the frame, never moved to the share.
+3. **The share gets what was asked for**: validation frames at a low rate or on an anomaly, and the solve result. The result
+   is a small record, not a file per cycle.
+4. **The solver takes an array and a header**, with the path form kept for the PHD2 stack, which has no memory path. This
+   removes the `image_path is None` error and the filename logic that encodes binning and ROI into a path before the
+   frame exists.
+
+**What it costs.** A frame in memory is only valid until the next exposure reuses its buffer, so every consumer (the
+tracker, the solver, the saver thread) must finish with it or copy it first; a saver thread writing frame N while frame N+1
+is read in would corrupt the file. That is why the persistent-buffer item of Stage 0 is not a simple optimisation:
+`pyzwoasi.getDataAfterExp` allocates and copies a buffer on every readout, so reusing one means calling the SDK
+directly, and it needs a buffer lifetime rule (a ring of two, or a copy for the saver) and a measurement on a unit at
+guide cadence first.
+
+**Work this adds** (none started): a solver entry point that accepts an array and a header (Stage 1, with the
+`zwo + solving` stack, since `SolvingGuider` is where the per-cycle files come from today); the rule that
+`Guider.make_guiding_settings` does not ask for a save by default; a buffer-lifetime rule and test before the persistent
+buffer (Stage 0); and the guide loop on arrays from its first version (Stage 2).
+
+### 3.2 The guide log (decided 2026-11-23)
+
+The guider writes a running log of its status and its correction decisions, as PHD2 writes its guide log, so that a
+post-mortem tool can show what it saw, decided and did: the error against time, which frames were corrected, held or
+ignored and why, the star count and scatter, when the stars were lost, what each validation solve found.
+
+- **A guiding session has its own folder**, as an acquisition has: `<observing night>/Guidings/seq=NNNN,time=<UTC start>[,...]`
+  (`PathMaker.make_guiding_session_folder`, numbered per night in `Guidings/seq.txt`). It holds the guide log, the sampled
+  frames (§3.1) and the solve results of the session.
+- **The file is on the RAM disk**, written and flushed a line at a time (fast, and it survives a crash of the process), and
+  **shipped to the share with the folder when the session ends** (`Filer.move_ram_to_shared`). While it is open the folder is
+  claimed against the filer's movers (`MoveGuardian.protect`). What a crash leaves on the RAM disk is relocated by the filer's
+  startup sweep. It never raises: a log that cannot be written goes quiet after one warning and guiding goes on.
+- **The format** (`mast_guider.guide_log`, version 1.0) follows PHD2's: a header of `[Section]` and `key = value` lines
+  (unit, camera, exposure, plate scale, fibre pixel, algorithm and star-selection settings, the guide stars), `Guiding
+  Begins`, one CSV row per frame with `INFO:` event lines among the rows, `Guiding Ends` with the reason. It is **not**
+  PHD2's columns, which are pulse durations and directions; this guider sends sky offsets. A row has the measured
+  displacement in pixels and arcsec, the correction sent, the **decision** (`applied`, `deadband`, `clamped`, `settling`,
+  `validating`, `star_lost`, `held`, `no_frame`, `paused`), the star count and the number used, the scatter between stars,
+  SNR, star mass, HFD, whether the mount was settling, an error text, and a JSON `Detail` (per-star displacements, ...). Events
+  mark star acquired and lost, settle changes, validation solves (`VALIDATION`), reference changes and alarms.
+- **Reading it back**: `read_guide_log(path)` returns the header, the rows (numbers as numbers, blanks as `None`), the
+  events and the begin and end. The viewer is a separate tool, not built.
+
+**Built (2026-11-23):** the folder helper (MAST_common `mast_guiding`), the writer and the reader, with tests. **Not built:** the
+guider that writes it (Stage 2), the viewer, and the choice of what the guider puts in `Detail` and in the header.
+
+### 3.3 Validation (decided 2026-11-23)
+
+The guider checks its own pointing against the sky once a minute (`validation.interval_seconds`, default 60) and never stops
+guiding to do it.
+
+**Frames.** Full frames, binned 2x2 (`guiding.binning`), every cycle, with the regular guide exposure. There is no ROI to
+switch, no separate validation exposure, no gap in guiding, and no buffer to resize. The solver solves on a 2x2 grid anyway, and a
+star is 5 to 6 binned pixels across, enough for a fixed-window centroid. A frame is about 23 MB, so a ring of two is 47 MB; the
+units have 64 GB, so memory is not the constraint. A star cannot drift out of a full frame, as it can out of a small ROI, and a
+lost star can be replaced without re-acquiring. **To measure on a unit before committing:** the cycle time of a full frame
+(readout and USB transfer) and USB stability at guide cadence (§9). If a cycle is much over about 2 s, the fallback is a
+guide ROI with one full frame per validation.
+
+**The shadow model** is detected **once, from the reference frame** (fold mirror at SPEC), and reused. It does not change while
+the fold-mirror stage stays where it is, and the stage is not expected to move during guiding, so there is no per-frame
+detection and no allowance for drift. The guard: the guider records the stage position with the model and checks it at every
+validation; if it has moved, an event is logged, the model is dropped, and the next reference detects a new one. It is the
+*geometry* that is reused (the umbra and penumbra, with their margin); the depth varies with the sky and is not assumed.
+
+**The region** is a rectangle about the fibre pixel from the config DB (`guiding.region`, half-width and half-height). It says
+which stars are eligible; the shadow model excludes the band and the low-coma preference of §11.4 applies. **One region serves
+both guiding and validation:** the guide stars are chosen from it once, at the reference, and the tracker follows them; the
+validation extracts fresh sources from it. On mast01 the shadow's penumbra half-width is about 1,960 px, so a region that reaches
+stars outside it needs a half-width of roughly 3,200 to 3,500 px and a half-height of 1,000 to 1,500 px, to be set from each
+unit's shadow.
+
+**The validation** runs in a **background thread**, at low priority so it does not delay the loop, one at a time: a validation that
+falls due while the last is still running is skipped and logged, and a result that arrives after guiding has stopped is dropped.
+It takes the current frame (held until it is done), extracts sources from the region, selects them with the shadow model, writes
+an xylist in full-frame pixels with the full frame's size and CRPIX at the fibre pixel, and runs `solve-field` on it. In our
+timings that step took 1.3 s of the `selective` call; the 8 s of shadow detection is no longer paid, and the extraction and
+selection are over the region, to be measured.
+
+**The correction is a shift of the guide reference, not a mount move.** The solve gives where the fibre points against the
+target, `E` (east and north, arcsec). From the *same* frame the tracker gives the loop's own displacement `g`: how far the guide
+stars are from their reference positions. What the loop cannot see is `E - g`, the reference's own error, and that is the shift.
+Both are from one instant, so the delay of the solve does not matter and there is nothing to subtract for the corrections made
+while it ran. The reference positions move by that offset, converted to pixels through `PixelToSky`, and the regular loop
+(hysteresis, dead-band, `max_correction_arcsec`) absorbs the difference over a few cycles. So there is no `solve_and_correct`, no
+second mount motion, no settle, no re-reference, and no "no guiding corrections while correcting" mode. Because each step is
+clamped, a correction during a spectrograph integration is gentle. A single shift is limited to `max_shift_arcsec`; a larger
+one is not applied and is reported.
+
+**The alert.** If `|E|` is more than **1.5 times the tolerance** (`guiding.tolerance`, RA in plain RA as the rest of the unit
+does it) on either axis, the guider raises an alert, whether or not the shift was applied: it is not holding the target. The
+alert is a guide-log event (§3.2) and goes to the unit's status.
+
+**Bad data is not "out of position".** A solve that fails a gate changes nothing and is logged as a `VALIDATION` event with the
+reason: fewer matched stars than `min_matched_stars`, a residual above `max_residual_arcsec`, a scale or rotation far from the
+expected, or a shift above `max_shift_arcsec`. Without the gate one solve through thin cloud would move the reference. A few
+failures in a row raise an alert of their own: the guider cannot validate.
+
+**What to watch**
+- **The full-frame cycle time**, above, and the USB load of a full frame every cycle.
+- **Too few stars at the guide exposure.** In the Gaia pilot the one 2 s mast02 frame had nothing the selection kept (0 of
+  191 detections) and did not solve; the 5 s frames did. If validations keep failing for want of stars, the exposure, or the
+  region, has to grow.
+- **Mirror-in accuracy is unmeasured.** The pilot was mirror-out. With the mirror in, the shadow is over the fibre and its
+  position is interpolated from stars 1,700 to 2,500 px away on either side. The alert threshold must exceed the solve's own
+  accuracy there; the on-sky survey has to include a mirror-in case before it is trusted.
+- **Coma against shadow** on mast01 (§11.4): the stars outside the penumbra are outside the geometric low-coma radius.
+- **Resources.** The frame is held until the solve ends, so the ring must not recycle it: the validation takes a copy, or the ring
+  is deep enough; the solver needs the xylist entry point of §3.1; the same solve refreshes `PixelToSky`'s rotation and scale.
 
 ## 4. Port from PHD2 vs drop
 
@@ -264,8 +393,8 @@ startup, so fallback is minutes, documented per stage).
   → spec handoff works; a deliberate star-loss (cap the cover) stops cleanly with
   an alarm; `SolvingGuider` fallback verified.
 - **Stage 3 — full parity:** feed `sky_quality` from the guide loop (rename
-  `SeeingQualityWhilePHD2Guiding`); activate validation **drift correction**
-  (`validation.action=correct`); star-loss **v2: auto-reacquire**; move the
+  `SeeingQualityWhilePHD2Guiding`); activate validation (§3.3): the
+  reference shift and the out-of-position alert; star-loss **v2: auto-reacquire**; move the
   FCU-v2 handoff and validation-timer ownership fully out of `src/phd2/phd2.py`.
   Roll out to remaining units one at a time with the Stage 1+2 checklist.
 - **Stage 4 — decommission:** remove PHD2 from configs; delete the handover dance;
@@ -282,7 +411,8 @@ startup, so fallback is minutes, documented per stage).
   `algorithm` (ra/dec aggressiveness + hysteresis, `max_correction_arcsec`,
   `settle_mode`), `star` (`min_snr`, `saturation_adu`, `mass_change_threshold`,
   `search_box_pixels`, `estimator`), `settle` (`pixels`, `seconds`, `timeout`),
-  `validation` (`interval_seconds`, `action`, `full_frame`). The existing
+  `region` (`half_width_px`, `half_height_px`) and `validation` (`interval_seconds` = 60, `alert_tolerance_factor` = 1.5,
+  `min_matched_stars`, `max_residual_arcsec`, `max_shift_arcsec`; §3.3). The existing
   `min_*_correction_arcsec`, `tolerance`, `cadence_seconds`, `rois`,
   `exposure/binning/gain` are reused. **Nothing else** in `common`.
 
@@ -323,11 +453,9 @@ hardware):
   counters in status.
 - **Single-camera contention** — MAST units use the *same* camera for
   acquisition and guiding; the fiber feeds the spectrograph, so during spec
-  integration the camera is free to guide (the operating model). Validation
-  full-frames pause centroid guiding for exposure+solve; mitigate with short
-  validation exposures, the RAM-disk-indexed solver (~few s), and suppressing
-  *corrections* (not measurements) during the gap. If solve latency exceeds
-  budget, fall back to large-ROI (not full-frame) validation.
+  integration the camera is free to guide (the operating model). Every cycle
+  is a full frame (§3.3), so there is no separate validation exposure to pause guiding, and the solve runs in the
+  background; the cost is the full-frame cycle time, to be measured.
 - **Wind vs settle** — 5.9″ gusts make 0.5″ settle unsatisfiable; guide-loop
   settle must use wind-realistic tolerances from config, or the `blank_frames`
   mode which cannot deadlock.
