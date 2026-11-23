@@ -85,20 +85,20 @@ So the estimator is *not* what makes `original` differ from `selective`. About 0
 
 ## The on-sky survey (next)
 
-The one measurement that settles which position the fibre responds to: put a Gaia star on the fibre and measure how its light
-couples, against where the solved WCS says the fibre is.
+The harness picks about 20 Gaia stars, runs a mastrometry acquisition on each with `selective` sources, and compares
+the resulting pointing with the star's Gaia coordinates. The same run in `original` gives the comparison.
 
-1. **Targets.** 15 to 20 isolated Gaia stars, G about 8 to 11 (below the saturation margin), low proper motion, no
-   neighbour within 30 arcsec, spread over altitude, azimuth and star density.
-2. **Frames.** For each target, the acquisition-phase frame (mirror out) solved in both modes, then the star
-   positioned on the fibre by a small grid of mount offsets about the solved position. The throughput through the
-   fibre (the spectrograph's flux, or the guider's) against offset gives where the fibre's response peaks, to compare
-   with each mode's WCS-predicted position.
-3. **Both modes on the same frames**, offline, so only the solver differs.
-4. **Decision criterion, set before looking.** `selective` becomes the default if its offset at the fibre (the
-   median vector within 500 px, with the fibre-response position as the truth) is smaller than `original`'s by at
-   least two standard errors (over frames, not stars) on every unit tested. Otherwise it stays opt-in, and the units
-   where it loses are examined first.
+1. **Targets (`plan`).** 15 to 20 isolated Gaia stars, G about 8 to 11 (below the saturation margin), low proper
+   motion, no neighbour within 30 arcsec, spread over altitude, azimuth and star density. Coordinates are the Gaia
+   position with proper motion applied to the observation epoch.
+2. **Acquisition (`acquire`).** For each target, on the unit: slew to the star, then run a normal mastrometry
+   acquisition with the mode under test (`selective`, and `original` as the baseline). Save the frames and a sidecar
+   with the target, mode, time and the pointing the acquisition ended with.
+3. **Comparison (`analyse`).** The resulting pointing (where the solved WCS puts the fibre pixel, and the acquisition's
+   final correction) against the target's Gaia coordinates, in arcsec east and north, per target and mode.
+4. **Decision criterion, set before looking.** `selective` becomes the default if its pointing error is smaller than
+   `original`'s by at least two standard errors (over targets, not stars) on every unit tested. Otherwise it stays
+   opt-in, and the units where it loses are examined first.
 
 ## Harness
 
@@ -109,7 +109,7 @@ since it needs no telescope time:
   with the fixed-window centroid, per-star output, standard errors over frames as well as stars. It reproduced the pilot's numbers exactly. It reads the layout `tools/source_survey.py
   --via-solver` leaves, which is on a branch that is not merged yet, and it needs the Gaia catalog share.
 - `plan`: choose targets for a unit and a night from the Gaia catalog.
-- `acquire`: on the unit, slew, offset, expose, and save frames with a sidecar of target, offset and time.
+- `acquire`: on the unit, slew to each target, run the acquisition in the mode under test, and save the frames with a sidecar of target, mode, time and resulting pointing.
 
 ## Open
 
