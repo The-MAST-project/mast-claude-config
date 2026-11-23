@@ -2,7 +2,8 @@
 
 Nov 22, 2026 · Arie Blumenzweig
 
-> **Status: an offline pilot is done (24 mast02 acquisition frames, 2026-11-22); the on-sky survey is not started.**
+> **Status: an offline pilot is done (24 mast02 acquisition frames, 2026-11-22). The survey harness is built (2026-11-23,
+> MAST_unit PR #420, not merged) and has not yet run on a unit.**
 > Companion to `mastrometry_source_selection_design.md` (the stages compared) and
 > `MAST_unit/docs/mastrometry_stages.md` (the earlier offline results). `shadowed` is not part of this comparison.
 
@@ -85,37 +86,61 @@ So the estimator is *not* what makes `original` differ from `selective`. About 0
 
 ## The on-sky survey (next)
 
-The harness picks about 20 Gaia stars, runs a mastrometry acquisition on each with `selective` sources, and compares
-the resulting pointing with the star's Gaia coordinates. The same run in `original` gives the comparison.
+The harness picks about 20 Gaia stars and runs one mastrometry acquisition on each, in whatever mode the unit is
+configured for (there is no per-call override, and mast02 is on `original`: nothing in the configuration database sets
+`source_selection`). The acquisition's last frame is then **re-solved offline in both modes**, and each mode's position of
+the target star is compared with the star's Gaia coordinates. Only the solver differs between the modes, because they
+are scored on the same frame; the acquisition itself ran in the unit's one mode. (Two acquisitions per star, one per
+mode, were rejected: separate runs add seeing, altitude and slew noise that can swamp a difference of a few tenths of
+an arcsec at 20 targets. Flipping the mode per target through the configuration was the alternative, and needs a
+config write path.)
 
-1. **Targets (`plan`).** 15 to 20 isolated Gaia stars, G about 8 to 11 (below the saturation margin), low proper
-   motion, no neighbour within 30 arcsec, spread over altitude, azimuth and star density. Coordinates are the Gaia
-   position with proper motion applied to the observation epoch.
-2. **Acquisition (`acquire`).** For each target, on the unit: slew to the star, then run a normal mastrometry
-   acquisition with the mode under test (`selective`, and `original` as the baseline). Save the frames and a sidecar
-   with the target, mode, time and the pointing the acquisition ended with.
-3. **Comparison (`analyse`).** The resulting pointing (where the solved WCS puts the fibre pixel, and the acquisition's
-   final correction) against the target's Gaia coordinates, in arcsec east and north, per target and mode.
-4. **Decision criterion, set before looking.** `selective` becomes the default if its pointing error is smaller than
-   `original`'s by at least two standard errors (over targets, not stars) on every unit tested. Otherwise it stays
-   opt-in, and the units where it loses are examined first.
+1. **Targets (`plan`).** 15 to 20 isolated Gaia stars, G 8 to 11 (below the saturation margin), a measured proper
+   motion of at most 10 mas/yr, **no catalog star of any brightness down to G 18 within 30 arcsec**, spread over
+   altitude (35 to 80 degrees) and azimuth (farthest-point sampling of 4 x 8 sky cells; star density is recorded, not
+   enforced). Coordinates are Gaia's with proper motion applied to the planning time.
+2. **Acquisition (`acquire`).** For each target, on the unit: `start_acquisition_and_guiding` with the Gaia position,
+   unguided afterwards. A sidecar records the target, how the acquisition ended (each phase's last offset against
+   tolerance), where its products are on the share, and the mount's own position. Resumable; a failing target is
+   recorded and the run goes on.
+3. **Both modes, offline (`solve`).** The last raw frame of the acquisition's mirror-out phase, solved in `original`
+   and `selective` with `tools/source_survey.py --via-solver` (MAST_unit branch `solver-source-selection`, PR #421),
+   with the pilot's selection parameters. This needs the astrometry.net indexes: run it on a unit or on mast08.
+4. **Comparison (`pointing`).** The target star is the brightest source within 25 full-frame pixels of the fibre pixel,
+   at its fixed-window centroid. Through each mode's solved WCS it gives a sky position; the error is that minus the
+   star's Gaia position, east and north in arcsec. A mode whose fit used the target star is flagged: its error is not
+   independent (`selective` fits only 22 to 30 stars). The report gives each mode's median vector and the paired
+   difference over targets.
+5. **Decision criterion, set before looking.** `selective` becomes the default if its error is smaller than
+   `original`'s by at least two standard errors, paired over targets (not stars), on every unit tested. Otherwise it
+   stays opt-in, and the units where it loses are examined first.
+
+**What this measures.** The WCS error at the star the acquisition put on the fibre, i.e. the error at the fibre's
+position, against Gaia and independently of either solver's own fit. It does not show what the fibre responds to
+(the core, or the light-weighted centre): that stays open, below.
 
 ## Harness
 
-A standalone `tools/gaia_accuracy_survey.py` in MAST_unit. The pilot's analysis becomes its `analyse` step first,
-since it needs no telescope time:
+A standalone `tools/gaia_accuracy_survey.py` in MAST_unit, one step per stage, all built 2026-11-22/23 with tests
+(PR #420; none has run on a unit):
 
-- `analyse` (**built 2026-11-22**, `tools/gaia_accuracy_survey.py`, with its tests): the pilot's held-out scoring,
-  with the fixed-window centroid, per-star output, standard errors over frames as well as stars. It reproduced the pilot's numbers exactly. It reads the layout `tools/source_survey.py
-  --via-solver` leaves, which is on a branch that is not merged yet, and it needs the Gaia catalog share.
-- `plan`: choose targets for a unit and a night from the Gaia catalog.
-- `acquire`: on the unit, slew to each target, run the acquisition in the mode under test, and save the frames with a sidecar of target, mode, time and resulting pointing.
+- `plan` -- the targets for a night, from the Gaia catalog share, into `targets.csv`.
+- `acquire` -- one acquisition per target, with a sidecar.
+- `solve` -- both modes on each target's last frame.
+- `pointing` -- the target stars against Gaia, the criterion over targets, `pointing.csv`.
+- `analyse` -- the pilot's held-out scoring over the whole frame, with the fixed-window centroid, per-star output,
+  standard errors over frames as well as stars. It reproduced the pilot's numbers exactly. A cross-check on `pointing`,
+  not part of the decision.
+
+`solve` and `analyse` read and write the layout `tools/source_survey.py --via-solver` leaves, which is on a branch that
+is not merged yet; `plan` and `analyse` need the Gaia catalog share (run on a unit or on mast-ns-control).
 
 ## Open
 
-- **Units and nights.** Not chosen. mast02 is the best documented for acquisition frames; mast01 would need its
+- **Units and nights.** Not chosen; the first run on a unit will also show whether the harness works end to end. mast02 is the best documented for acquisition frames; mast01 would need its
   acquisition-phase frames.
 - **Which estimator describes the fibre?** The fixed window is chosen to match astrometry.net, not because it
   describes the fibre; only the on-sky test decides that.
 - **mast02 frames 04 to 06**, where `selective` is clearly worse, and the **one-pixel offset of `original`**.
+- **Saturation.** Whether a G 8 to 11 star saturates at 5 s, and how its centroid behaves, is unchecked.
 - **Epoch.** The pilot used the exposure start, not mid-exposure; negligible at 5 s.
