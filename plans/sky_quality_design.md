@@ -18,8 +18,8 @@ today.
 > named here as later phases but are **not specified** — do not build them from this
 > note. An authoritative **site-wide** sky survey (a dedicated SQM / all-sky camera)
 > is **explicitly out of scope**: a unit measures only its own pencil beam, and only
-> while active. See [§9](#9-the-site-layer-out-of-scope-here) and
-> [§10](#10-deferred--out-of-scope).
+> while active. See [§10](#10-the-site-layer-out-of-scope-here) and
+> [§11](#11-deferred--out-of-scope).
 
 ---
 
@@ -49,7 +49,7 @@ support later per-product provenance, cross-unit corroboration, and a per-unit
 baseline.
 
 **Non-goals (this design).** The abort decision, active (non-parasitic) probing,
-and any site-wide survey. See [§10](#10-deferred--out-of-scope).
+and any site-wide survey. See [§11](#11-deferred--out-of-scope).
 
 ---
 
@@ -236,7 +236,73 @@ config per the unit's configuration conventions.
 
 ---
 
-## 9. The site layer (out of scope here)
+## 9. Session health — "how is this guiding session doing?"
+
+A **per-session consumer** of the guide log (the `mast_guider` nightly guiding JSONL)
+**joined with this layer's absolute SQM series** (§3). It answers a question neither
+source answers alone: *is the loop performing — and if not, is it the loop or the sky?*
+That join is the reason it is specified here rather than in the guider: the SQM reading
+is what keeps the verdict honest.
+
+**Do not collapse it to one scalar.** A session has a quality **vector**; a single
+number hides exactly the thing worth knowing. A session can hold tight residual while
+spending half its time star-lost (looks great, isn't guiding), or run mediocre residual
+that is in fact **excellent for the sky it had**.
+
+**Three guider sub-scores**, all from fields the guide-log cycle already carries
+(`decision`, `error_arcsec`, `scatter_px`, `n_used`) — orthogonal by construction
+(output / duty-cycle / input):
+
+1. **Tracking** — the residual, robustly. Per-axis (RA/Dec) and total **median and
+   p90/p95 |error|**, *not* mean RMS alone (RMS is dominated by the settle phase and by
+   outliers). Scored against a **budget** — a fraction of the seeing disk / fibre, or a
+   fixed arcsec target: `tracking = clamp(1 − p90/budget)`.
+2. **Availability** — is the loop actually closing. Duty cycle from `decision`:
+   `applied + deadband` (good measurement, loop in control) vs `held_scatter` vs
+   `star_lost`, plus the **longest continuous star-lost gap** (ten scattered losses is
+   fine; one 90-second blackout is not). A 40%-star-lost session is not-guiding,
+   however tight its measured frames.
+3. **Input quality** — rolling `n_used` and `scatter_px`. Falling star count / rising
+   scatter is the early warning; it leads tracking degradation by several cycles.
+
+**Temporal shape:**
+- **Two windows** — a trailing ~60–120 s EMA for "how is it doing *now*" (a status
+  tile, reusing the §6 windowing), and a whole-session aggregate for the post-mortem
+  (a session-end `event` record).
+- **Trend** — the sign of the rolling-residual derivative. "Recovering from acquisition
+  settle" and "started tight, falling apart" have identical instantaneous RMS and
+  opposite meaning.
+- **Exclude the settle phase** from the steady-state score (detect steady-state: error
+  below threshold for N cycles), else every session looks bad for its first 20 cycles.
+  Report **time-to-settle** separately — it is its own useful number.
+
+**Conditioning on sky — why this lives here.** The SQM is what turns "mediocre" into
+either *the loop is failing* or *the loop is doing all the sky allows*. Two tiers:
+
+- **Regime label (Phase 1-ready).** When availability drops, check the SQM window (§6):
+  if SQM collapsed concurrently, annotate the low score **"sky-limited"** rather than
+  charging it to the guider — clouds and a broken loop otherwise produce the same grade,
+  and the operator's response (wait vs. go chase pointing/periodic-error) is opposite.
+  This is a pure join of the guide log against this layer's samples; it needs nothing
+  beyond Phase 1.
+- **Expectation residual (Phase 3, the sweeper).** The honest measure is the residual of
+  tracking / `n_used` **against what this SQM permits**, learned over nights by the §10
+  sweeper's per-unit baseline. "As tight as the sky allows" then scores well at
+  absolute-mediocre residual, and tight residual under great sky that *should* have been
+  tighter scores poorly.
+
+**Headline last.** Once the vector exists, a single grade is a weighted roll-up (e.g.
+`0.5·tracking + 0.3·availability + 0.2·input`), gated to "sky-limited" when the SQM
+explains the loss — displayed **only with the three sub-scores and the sky regime beside
+it**, never the grade alone, which was the entire point.
+
+**Shape.** A pure reader over the guiding JSONL (stdlib, the `read_guide_log` pattern)
+→ a `SessionHealth` struct: testable off a unit, surfaced as a status tile, a
+session-end `event` record, and a `mast-guide-scope` header row.
+
+---
+
+## 10. The site layer (out of scope here)
 
 A unit's log is a **labeled pencil-beam time series**, gathered only while the unit
 was active on its task. The **authoritative** site sky quality comes from a
@@ -261,7 +327,7 @@ The sweeper and the dedicated instrument are **not specified here.**
 
 ---
 
-## 10. Deferred / out of scope
+## 11. Deferred / out of scope
 
 - **Abort-on-conditions policy.** The unit could abort its own job locally on bad
   readings (low latency, good for not wasting exposure time), but a
@@ -275,12 +341,12 @@ The sweeper and the dedicated instrument are **not specified here.**
 - **Active / idle-time probing.** Strictly parasitic (principle 2). The log goes
   blind while the unit is idle; inverting "abort when bad" into "resume when good"
   is the **orchestrator's** problem (it can command a probe frame), not this layer's.
-- **The site-wide survey** — the dedicated SQM / all-sky camera (§9).
-- **The site sweeper** itself (§9).
+- **The site-wide survey** — the dedicated SQM / all-sky camera (§10).
+- **The site sweeper** itself (§10).
 
 ---
 
-## 11. Phasing
+## 12. Phasing
 
 - **Phase 1 — plumbing (self-contained, ships value).** Promote the frame+solve
   kernel to a shared module (§4); define `SkyQualitySample` (§3); the per-unit owner
@@ -288,16 +354,18 @@ The sweeper and the dedicated instrument are **not specified here.**
   on the guide-log pattern (§5); wire **one** feed (the §3.3 validation solve is the
   highest-value, lowest-cost); the ephemeral window in status (§6). No policy, no
   decisions.
-- **Phase 2 — local decision.** The simple abort trigger (§10) and its evidence
-  contract with the scheduler.
-- **Phase 3 — site.** The offline sweeper (§9), against the dedicated instrument.
+- **Phase 2 — local decision.** The simple abort trigger (§11) and its evidence
+  contract with the scheduler. The **session-health measure** (§9) — at least its
+  Phase-1-ready regime-labelled form — is a natural consumer to add here.
+- **Phase 3 — site.** The offline sweeper (§10), against the dedicated instrument,
+  which also supplies the expectation baseline the session-health residual (§9) needs.
 
 Phase 1 delivers a durable per-beam, per-product sky-quality record and a status
 gauge with **no dependence** on Phases 2–3 or on the dedicated instrument.
 
 ---
 
-## 12. Open questions
+## 13. Open questions
 
 - **Which single feed for Phase 1?** The §3.3 validation solve is the recommendation
   (continuous, free, already full-frame and solved). Confirm before building.
